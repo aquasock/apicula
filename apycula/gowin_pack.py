@@ -675,11 +675,35 @@ class ChipDB:
         -- the Arora V static delay step, 255 values of which one is named --
         can only be addressed by its id, exactly as `get_osc_attr_val` already
         addresses the oscillator divider.
+
+        The pair is checked against the device's own table first, because
+        `add_attr_val` drops one it cannot find and says nothing.  That is how
+        a bitstream with an unclocked serialiser came to be built and loaded:
+        an `IOLOGIC_FCLK` naming a lane this die's `FCLKSEL` rows do not carry
+        produced `FCLKSEL1 = HCLK1`, the pair had no row, and the whole clock
+        selection vanished without a warning.  A quiet miscompile is worse
+        than a refusal, so this refuses.
         """
         val = attrval.val
         if isinstance(val, str):
             val = attrids.iologic_attrvals[val]
-        add_attr_val(self.db, 'IOLOGIC', av, attrids.iologic_attrids[attrval.attr], val)
+        attr = attrids.iologic_attrids[attrval.attr]
+        # Scoped to the fast-clock selection on purpose.  Several IOLOGIC
+        # attributes this device cannot encode are dropped harmlessly today --
+        # `LSROMUX_0` among them, which a working vendor bitstream carries and
+        # these tables do not, so the tables are incomplete in both directions
+        # -- and refusing those would stop bitstreams that work.  The clock
+        # selection is different: dropping it leaves a cell with no clock, the
+        # bitstream still builds and loads, and nothing says so.
+        if attrval.attr.startswith('FCLKSEL') and (attr, val) not in self.db.logicinfo['IOLOGIC']:
+            raise Exception(
+                f"IOLOGIC {attrval.attr}={attrval.val!r} is not encodable on "
+                f"{self.device_name}: the IOLOGIC table has no row for that "
+                f"attribute and value, so the clock selection would be dropped "
+                f"silently and the cell left unclocked.  The flow must place "
+                f"that clock on a lane this device can select; see Tang-Build "
+                f"evidence/desktop-clock-routing.txt section 17.")
+        add_attr_val(self.db, 'IOLOGIC', av, attr, val)
 
     def get_iologic_fuse_cell(self, x: int, y: int, idx_str: str) -> Coord:
         """ The cell one IOLOGIC half's fuses are written into.
@@ -2296,11 +2320,18 @@ class Device:
             attr_vals.append(AttrVal('UPDATE', val))
 
         if cell_parms['OUTMODE'] == 'ODDRX8' or cell_parms['OUTMODE'] == 'DDRENABLE16':
-            attr_vals.append(AttrVal('LSROMUX_0', '0'))
+            attr_vals.append(AttrVal('LSROMUX_0', 0))
         elif cell_parms['OUTMODE'] != 'ODDRX1' or bel.cell.typ == 'ODDRC':
-            attr_vals.append(AttrVal('LSROMUX_0', '1'))
+            # By value id, not by name.  `get_iologic_attr_val` resolves a str
+            # through `iologic_attrvals`, where '1' is the code 2, while this
+            # device's IOLOGIC table keys `LSROMUX_0` on the value 1 -- so
+            # passing the string looked up a pair with no row and the fuse was
+            # dropped without a word.  An int skips the name table.  MEASURED:
+            # a working vendor bitstream carries `LSROMUX_0 1` on its
+            # serialisers and this packer wrote nothing.
+            attr_vals.append(AttrVal('LSROMUX_0', 1))
         else:
-            attr_vals.append(AttrVal('LSROMUX_0', '0'))
+            attr_vals.append(AttrVal('LSROMUX_0', 0))
 
         if cell_parms['OUTMODE'] == 'DDRENABLE16':
             attr_vals.append(AttrVal('OUTMODE', 'DDRENABLE'))
@@ -7395,8 +7426,30 @@ class GW5AST_138C(GW5A):
         `FCLKSEL1=HCLK2` and `FCLKSEL2=HCLK2_`, and those three are exactly the
         two fuses -- (0,123) and (3,131) -- by which the packer's set was a
         strict subset of the vendor's.  Two selection attributes, not the
-        GW5A-25A's four: this die spells the lane once plain and once with the
-        trailing underscore, and has no `FCLKSEL0`/`FCLKSEL3` row for it.
+        GW5A-25A's four: this die spells the lane once plain (`FCLKSEL1`) and
+        once with the trailing underscore (`FCLKSEL2`).  That pair covers lanes
+        0, 1 and 2 plain and lanes 0, 2 and 3 underscored, so lanes 0 and 2 are
+        the only lanes it can complete -- which is why `chipdb.gw5_make_hclk_pips`
+        offers an IOLOGIC no other lane to route to.
+
+        A RETRACTION, because this paragraph used to claim that this die "has
+        no `FCLKSEL0`/`FCLKSEL3` row".  It has them.  Read out of the device's
+        own table (`logicinfo['IOLOGIC']` with `iologic_attrids`): `FCLKSEL0` is
+        id 79 and carries `HCLK0`, `HCLK1` and `HCLK3`; `FCLKSEL3` is id 129 and
+        carries `HCLK0` and `HCLK0_`.  The working vendor bitstream uses them --
+        its serialisers decode with all four values.  The old claim had been
+        generalised from one measured `OSER4`, the same error core-log entries
+        23 and 25 record twice.
+
+        Nothing is changed here on account of it, and that is a matter of
+        evidence rather than caution: the decoder ALIASES `FCLKSEL` values onto
+        the same fuses (entry 26 -- forcing `HCLK_OUT0` and `HCLK_OUT2` packs
+        byte-identically, and a decode reports both as `FCLKSEL1 81`), so a
+        difference in the *attribute list* is not evidence of a difference in
+        the fuses.  Our serialisers decoding with two values where the vendor's
+        decode with four is therefore not a finding yet.  Settle it at the fuse
+        level at the three TMDS tiles, or on the board, before changing what
+        this writes.
 
         `sel_` is the attribute that takes the underscored spelling, or None
         for a path that has only the plain one.
@@ -7417,19 +7470,21 @@ class GW5AST_138C(GW5A):
         die costs no fuse at all, so an output gearbox came out of it with its
         `FCLK` unselected -- the two-bit gap `P3.T13` measured.
 
-        The `LSRIMUX_0` the shared handler also emits belongs to the *input*
-        half (`LSRIMUX` against the output's `LSROMUX`), so an output cell
-        carrying it spends a fuse the vendor does not.  MEASURED against the
-        vendor's own build of this project's desktop core, whose display works:
-        `LSRIMUX_0` is set in ours and clear in theirs, one fuse per tile, the
-        only difference found at the TMDS tiles -- and the TMDS tiles are
-        `OSER10`s.  It is the same attribute the `IDDRC` override below drops
-        for the same reason.
+        The `LSRIMUX_0` the shared handler also emits is KEPT.  Tang-Build
+        core-log entry 11 removed it here, measuring a Gowin build of this same
+        core in which `LSRIMUX_0` was clear -- but that build is
+        `TinyTang/build/desktop/source/impl/pnr/desktop.fs`, which entry 19 had
+        already flagged as not the file that drives the working display.  The
+        bitstream that does, `e83e2d4afbd7...`, carries `LSRIMUX_0 1` on its
+        serialisers and on every ordinary IOLOGIC -- re-measured for this
+        change with `gowin_unpack` rather than taken from the log -- and so does
+        this packer's own output everywhere except the output cells that
+        removal was scoped to, which left the three TMDS `OSER10`s as the only
+        IOLOGICs on the die without it.
         """
-        attrs = (super().get_out_iologic_attrs(bel)
-                 + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
-                 + self.oser16_aux_attrs(bel))
-        return [av for av in attrs if av.attr != 'LSRIMUX_0']
+        return (super().get_out_iologic_attrs(bel)
+                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
+                + self.oser16_aux_attrs(bel))
 
     def get_IOLOGIC_DUMMY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         """ The aux half of a narrow output gearbox costs this die no fuse.

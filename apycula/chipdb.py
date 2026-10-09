@@ -1459,6 +1459,37 @@ def _gw5_hclk_fabric_entry_lanes():
             if not w.startswith('CLK')]
 
 
+#: Devices whose IOLOGIC fast-clock mux has had its selectable lanes measured.
+#: A device absent here is offered all four, so nothing unmeasured is claimed
+#: and the GW5A-25A database stays byte-identical.
+_gw5a_iologic_fclk_lane_devices = {'GW5AST-138C'}
+
+
+def _gw5a_iologic_fclk_lanes(device):
+    """Which HCLK lanes an IOLOGIC's fast-clock mux can actually select.
+
+    On the GW5AST-138C that is lanes 0 and 2 only, and it is measured rather
+    than derived: forcing `IOLOGIC_FCLK` to each of `HCLK_OUT0..3` in a routed
+    netlist and packing gives `FCLKSEL1`/`FCLKSEL2` for the even values and
+    neither for the odd ones.  The invariant is that a lane is selectable only
+    when this device's `IOLOGIC` table can spell it **both** plain and
+    underscored -- `FCLKSEL1 = HCLK<n>` and `FCLKSEL2 = HCLK<n>_` -- and that
+    holds for lanes 0 and 2 and for neither odd lane: `FCLKSEL2` has no
+    `HCLK1_`/`HCLK3_` row, and `FCLKSEL1` has no `HCLK3` row either.  Lanes 0
+    and 2 pack byte-identically, which is why this is a measured table and not
+    arithmetic.
+
+    The reason it matters rather than being a cosmetic limitation: a lane the
+    table cannot express was dropped by `add_attr_val` **without a word**, so
+    the build succeeded and the bitstream loaded with the serialiser's clock
+    mux left unselected and no bit clock.  Offering only the encodable lanes
+    means the router cannot land an IOLOGIC's FCLK where the packer cannot
+    write it.  Tang-Build core-log entries 22-26, and
+    `evidence/desktop-clock-routing.txt` section 18 for the handoff.
+    """
+    return (0, 2) if device in _gw5a_iologic_fclk_lane_devices else (0, 1, 2, 3)
+
+
 def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
     hclk_off = gw5_hclk_wire_offset(device)
     ihclk_wire_num = gw5_ihclk_wire_num(device)
@@ -1533,7 +1564,7 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
         fuses = set()
         for i in range(2):
             dest = f'FCLK{"AB"[i]}'
-            for j in range(4):
+            for j in _gw5a_iologic_fclk_lanes(device):
                 src = f'HCLK{hclk_idx}{j}'
                 dev.hclk_pips.setdefault((row, col), {}).setdefault(dest, {}).update({src: fuses})
                 add_node(dev, f'HCLK{hclk_idx}_{src}', "GLOBAL_CLK", row, col, src)
