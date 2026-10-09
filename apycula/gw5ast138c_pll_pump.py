@@ -133,17 +133,75 @@ def fldcount(fref):
     return (int(fref // FLDCOUNT_STEP_MHZ) + 1) * 16
 
 
+#: The highest `FVCO` any of the 45 campaign points reached, in MHz
+#: (`f50_n26`, `f65_n20`, `f81_n16` are all 1300): the **fitted band's own
+#: ceiling**, which is the region this model was measured over and not a
+#: device limit (`DEV-009`).  Above it the ladder in `pump()` does not
+#: extrapolate; only a measured point (below) is answered.
+FVCO_FITTED_MAX = 1300.0
+
+#: Operating points the fit does **not** cover, each one measured from a
+#: vendor bitstream rather than derived.
+#:
+#: Read on 2026-10-08 out of the vendor's own build of this project's desktop
+#: core (`TinyTang/build/desktop/source/impl/pnr/desktop.fs`), one entry per
+#: hard `PLL` site, straight from `shortval[ttyp]['PLL']` -- the four derived
+#: attributes are only ever readable back out of a bitstream, so this is a
+#: measurement and not a rule:
+#:
+#:     (Fpfd 50, FVCO 1350)  pll_27    MDIV 27, ODIV0 50
+#:     (Fpfd 50, FVCO 2000)  pll_nes   MDIV 40, ODIV0 93
+#:     (Fpfd 27, FVCO 1485)  pll_hdmi  MDIV 55, ODIV0 4
+#:
+#: `FLDCOUNT` and `KVCO` agree with the ladder at all three, so the
+#: `FVCO > 1400` step the `GW5AST_138C` override drops really is absent here.
+#: `A_ICP_SEL`/`A_LPF_RES_SEL` do **not**: above the fitted band the vendor
+#: stays on `R4` with a lower current where the ladder would step to `R5`
+#: (`pll_nes` 140/R4 against the ladder's 80/R5, `pll_hdmi` 190/R4 against
+#: 110/R5).  Three points do not make a curve, so this is a table and not a
+#: fit -- a fourth operating point must be measured before it is packed.
+MEASURED_ABOVE_BAND = {
+    (50.0, 1350.0): (32, 190, 4),
+    (50.0, 2000.0): (32, 140, 4),
+    (27.0, 1485.0): (16, 190, 4),
+}
+
+
+def measured_above_band(fref, fvco):
+    """The measured `(fldcount, icp, r_idx)` for `(fref, fvco)`, or `None`.
+
+    Exact match only: a near miss is an operating point nothing measured.
+    """
+    for (fr, fv), triple in MEASURED_ABOVE_BAND.items():
+        if abs(fref - fr) < 1e-6 and abs(fvco - fv) < 1e-6:
+            return triple
+    return None
+
+
 def pump(fref, fvco):
     """`(fldcount, icp, r_idx)` -- the same triple `get_pll_pump` returns.
 
     `fref` and `fvco` are in MHz; `Ndiv = fvco / fref` is the feedback divider
     the charge current scales with.
 
-    Raises `PllPumpUnmeasured` for any point outside the fitted wedge --
-    `Fpfd` outside `[FPFD_MEASURED_MIN, FPFD_MEASURED_MAX]`, or an `Ndiv`
-    the ladder would answer with an unfitted resistor (`R3` below,
-    `R6` above).  It never extrapolates.
+    A point in `MEASURED_ABOVE_BAND` is answered from the measurement.  Every
+    other point outside the fitted wedge raises `PllPumpUnmeasured` -- an
+    `FVCO` above `FVCO_FITTED_MAX`, a `Fpfd` outside
+    `[FPFD_MEASURED_MIN, FPFD_MEASURED_MAX]`, or an `Ndiv` the ladder would
+    answer with an unfitted resistor (`R3` below, `R6` above).  It never
+    extrapolates.
     """
+    measured = measured_above_band(fref, fvco)
+    if measured is not None:
+        return measured
+
+    if fvco > FVCO_FITTED_MAX:
+        raise PllPumpUnmeasured(
+            f"FVCO {fvco} MHz (Fpfd {fref} MHz) is above the fitted band's "
+            f"{FVCO_FITTED_MAX} MHz ceiling and is not one of the measured "
+            f"points: the ladder does not extrapolate, so this operating "
+            f"point has to be measured (oracle run) before it can be packed")
+
     if not FPFD_MEASURED_MIN <= fref <= FPFD_MEASURED_MAX:
         raise PllPumpUnmeasured(
             f"Fpfd {fref} MHz is outside the measured band "

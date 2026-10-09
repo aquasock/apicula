@@ -1448,13 +1448,23 @@ def tile2verilog(dbrow, dbcol, bels, pips, clock_pips, mod, cst, db):
 
     # CLKDIV2 before CLKDIV, HCLK last: alternation is first-match, so
     # "CLKDIV2_0" must not be read as "CLKDIV" + "2_0".
-    belre = re.compile(r"(IOB|LUT|DFF|BANK|CFG|ALU|RAM16|ODDR|OSC[ZFHWO]?|BUFS|RPLL[AB]|PLLVR|IOLOGIC|BSRAM|DSP|CLKDIV2_|CLKDIV_|HCLK)(\w*)")
+    # `PLLVR` before `PLLA`/`PLL`: alternation is first-match, so the longer
+    # spellings must win.  The GW5AST-138C names its hard PLL simply `PLL`
+    # (`PLL_L[0]`/`PLL_R[..]`/`PLL_B[..]`), which the alternation had no
+    # branch for at all -- `belre.match('PLL')` returned `None` and the
+    # `.groups()` below raised, so the device could never be unpacked.
+    belre = re.compile(r"(IOB|LUT|DFF|BANK|CFG|ALU|RAM16|ODDR|OSC[ZFHWO]?|BUFS|RPLL[AB]|PLLVR|PLLA|PLL|IOLOGIC|BSRAM|DSP|CLKDIV2_|CLKDIV_|HCLK)(\w*)")
     bels_items = move_iologic(bels)
 
     iologic_detected = set()
     disable_oddr = False
     for bel, flags in bels_items:
-        typ, idx = belre.match(bel).groups()
+        m = belre.match(bel)
+        if m is None:
+            raise Exception(
+                f"gowin_unpack: no BEL-name branch matches {bel!r} at "
+                f"R{row}C{col}; add its prefix to tile2verilog's belre")
+        typ, idx = m.groups()
 
         if typ == "LUT":
             val = 0xffff - sum(1<<f for f in flags)

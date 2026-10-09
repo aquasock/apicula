@@ -480,6 +480,10 @@ class ChipDB:
         with importlib.resources.path('apycula', f'{self.device_name}.msgpack.xz') as path:
             self.db = load_chipdb(path)
         self.simplio_rows = sorted(list(self.db.simplio_rows))
+        #: `IO_TYPE` codes this device spells differently from the generic
+        #: `attrids.iob_attrvals` table.  Empty until the `Device` that builds
+        #: this `ChipDB` installs its own (see `Device.__init__`).
+        self.io_type_code_overrides = {}
 
     def io_loc_from_str_to_xyidx(self, io_loc: str) -> tuple[int, int, str]:
         side = io_loc[2]
@@ -645,7 +649,14 @@ class ChipDB:
         return get_bank_io_fuses(self.db, self.get_ttyp(x, y), av)
 
     def get_iob_attr_val(self, attrval: AttrVal, av: set[tuple[int, int]]):
-        add_attr_val(self.db, 'IOB', av, attrids.iob_attrids[attrval.attr], attrids.iob_attrvals[attrval.val])
+        val = attrval.val
+        if isinstance(val, str):
+            val = attrids.iob_attrvals[val]
+        # A device may spell a code differently from the generic table; the
+        # remap rides in on this `ChipDB` from the `Device` that built it.
+        if attrval.attr == 'IO_TYPE':
+            val = self.io_type_code_overrides.get(val, val)
+        add_attr_val(self.db, 'IOB', av, attrids.iob_attrids[attrval.attr], val)
 
     def get_io_diff_cfg(self, x: int, y: int, idx_str: str) -> IoDiffCfg:
         bel = self.get_tiledata(x, y).bels[f'IOB{idx_str}']
@@ -1036,6 +1047,16 @@ def c_static_dly_bits(parms: dict[str, str]) -> str:
 
 class Device:
     """ Base chip. The fuses for a specific chip are set in a class that inherits from this one. """
+
+    #: Whether emulated (`ELVDS_*`) differential IO may be placed on a pin this
+    #: chipdb marks `is_true_lvds`.  Off everywhere except the GW5AST-138C, which
+    #: measured it accepted (see that class).
+    emulated_lvds_on_true_lvds = False
+
+    #: `IO_TYPE` codes a device spells differently from the generic
+    #: `attrids.iob_attrvals` table; installed onto the chipdb at construction.
+    io_type_code_overrides = {}
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         self.cli_args = cli_args
         self.device_name = cli_args.get_device()
@@ -1049,6 +1070,7 @@ class Device:
         self.pnr = pnr
 
         self.chipdb = ChipDB(self.device_name)
+        self.chipdb.io_type_code_overrides = self.io_type_code_overrides
         self.used_slices = UsedSlices()
         # default slice attributes
         self.default_slice_attrvals = {}
@@ -1977,7 +1999,7 @@ class Device:
         io_diff_cfg = self.chipdb.get_io_diff_cfg(bel.x, bel.y, bel.idx_str)
         if not io_diff_cfg:
             raise Exception(f"X{bel.x}Y{bel.y}/IOB{bel.idx_str} ({bel.cell.name}) cannot be placed - location is not a LVDS pin")
-        if io_diff_cfg.true_lvds:
+        if io_diff_cfg.true_lvds and not self.emulated_lvds_on_true_lvds:
             raise Exception(f"X{bel.x}Y{bel.y}/IOB{bel.idx_str} ({bel.cell.name}) cannot be placed - location is a True LVDS pin")
         if io_diff_cfg.positive != (bel.cell.parms.get('DIFF') == 'P'):
             raise Exception(f"X{bel.x}Y{bel.y}/IOB{bel.idx_str} ({bel.cell.name}) cannot be placed - pin P must be IOBA, pin N must be IOBB")
@@ -2462,12 +2484,17 @@ class Device:
         """
         return fclkin / idiv * fbdiv * mdiv
 
-    def check_pll_fvco(self, fvco: float) -> None:
+    def check_pll_fvco(self, fvco: float, fref: float | None = None) -> None:
         """Device hook: reject a VCO frequency the part cannot reach.
 
         The base class has no opinion -- a device that publishes a VCO band in
         its datasheet overrides this.  This is deliberately NOT the `FCLKIN`
         range check below, which is about the *input* pin.
+
+        `fref` is the phase-detector frequency the same call site just
+        computed; it is unused here, and a device whose model covers measured
+        points outside its band (see `GW5AST_138C`) needs it to tell a
+        measured point from an unmeasured one.
         """
         return
 
@@ -5845,7 +5872,7 @@ class GW5A(Device):
         fclkfb = fref * fbdiv
         # XXX internal feedback for now
         fvco = self.compute_pll_fvco(fclkin, idiv, fbdiv, mdiv)
-        self.check_pll_fvco(fvco)
+        self.check_pll_fvco(fvco, fref)
         self.set_pll_pump_attrvals(av, fref, fvco)
 
         # set other attributes
@@ -7042,6 +7069,42 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
+
+    #: Emulated LVDS on a true-LVDS-capable pin is accepted by this device, and
+    #: refusing it here blocked this project's whole desktop core.
+    #:
+    #: MEASURED 2026-10-08, from the vendor's own build of that core
+    #: (`TinyTang/build/desktop/source/impl/pnr/desktop.fs`).  Its four TMDS
+    #: outputs sit on IOR105/IOR103/IOR101/IOR58 -- the pins the project's
+    #: `.cst` names, G15/H16, J14/H14, J15/H15, K17/J17 -- and every one of them
+    #: is `is_true_lvds` in this chipdb.  In the bitstream they carry **no
+    #: `LVDS_OUT`** and their IOB table reads `IO_TYPE=236` (a code the fork does
+    #: not name; the `.fse` holds both it and `LVCMOS33D`=39) with `DRIVE=8`,
+    #: `PULLMODE=NONE`, `SLEWRATE=FAST`.  The vendor's own report calls the
+    #: standard `LVCMOS33D`, i.e. *emulated* differential LVCMOS33, so the
+    #: vendor picks emulation on a true-LVDS pin rather than the `LVDS_OUT` path.
+    #: `check_tlvds_placement` still refuses emulation-only pins for `TLVDS_*`.
+    #:
+    #: Checked separately: with the `io_type_code_overrides` map and the
+    #: `default_elvds_obuf_attrs` extension below, the packed IOB fuses at all
+    #: four of those pins come out identical to the vendor's.  This flag only
+    #: lifts the placement refusal.
+    emulated_lvds_on_true_lvds = True
+
+    #: `IO_TYPE` codes where this device's `.fse` differs from the generic
+    #: name->code table.
+    #:
+    #: MEASURED 2026-10-08, from the vendor's own build of this project's
+    #: desktop core.  Its TMDS outputs are emulated differential LVCMOS33 --
+    #: `IO_TYPE=LVCMOS33D` in the `.cst`, which nextpnr hands the packer as
+    #: `LVCMOS_D` -- and the vendor writes **`IO_TYPE=236`** at all four pins.
+    #: The generic code for `LVCMOS_D` is 34, which this device's `.fse` does
+    #: **not** carry (it has 33 and 35 and not 34), so `add_attr_val` dropped
+    #: the attribute in silence and the core packed with no `IO_TYPE` at all;
+    #: 236 is in the `.fse` and unnamed, and is what the vendor's bitstream
+    #: uses there.  See the `emulated_lvds_on_true_lvds` note above.
+    io_type_code_overrides = {34: 236}
+
     #==============================
     #========== AE350 SoC
     #==============================
@@ -7137,6 +7200,26 @@ class GW5AST_138C(GW5A):
             (attr, '1' if attr == 'ODMUX_1' else val)
             for attr, val in self.default_tlvds_obuf_attrs
             if attr != 'PERSISTENT']
+
+        # `ELVDS_OBUF` on this die: the vendor's own build of this project's
+        # desktop core programmes three attributes the inherited `GW5A` set
+        # omits.  MEASURED 2026-10-08 at the four TMDS pins of
+        # `TinyTang/build/desktop/source/impl/pnr/desktop.fs` (IOR105/103/101/58
+        # = G15/J14/J15/K17 and their N halves, every one `is_true_lvds`), by
+        # reading the site's `longval[ttyp]['IOB*']` table back: the vendor
+        # writes `DRIVE_LEVEL='8'` beside `DRIVE='8'`, `PADDI`, and attribute
+        # 51 = `TRIMUX`, where the inherited set carries `DRIVE` alone.
+        #
+        # That set is what says this is the *emulated* path and not `TLVDS`:
+        # the vendor's `DRIVE` is 8, and `TLVDS_OBUF` programs 0.  Without the
+        # three, the emitted IOB fuses at those tiles are a strict subset of
+        # the vendor's; with them they match exactly, checked tile by tile at
+        # all four.  Attribute 51 has no name in `attrids` (it is spelled
+        # `IOB_UNKNOWN51`) and its meaning is unmeasured -- it is emitted here
+        # because the vendor emits it, and it should be dropped again if it is
+        # ever shown to be conditional on something else.
+        self.default_elvds_obuf_attrs = list(self.default_elvds_obuf_attrs) + [
+            ('DRIVE_LEVEL', '8'), ('PADDI', 'PADDI'), ('IOB_UNKNOWN51', 'TRIMUX')]
 
     def tlvds_obuf_attrs(self, idx_str: str) -> list[tuple[str, str]]:
         return (self.default_tlvds_obuf_p_attrs if idx_str == 'A'
@@ -7417,14 +7500,27 @@ class GW5AST_138C(GW5A):
         """
         return (800., 1000., 5.079, 1300., 650.)
 
-    def check_pll_fvco(self, fvco: float) -> None:
+    def check_pll_fvco(self, fvco: float, fref: float | None = None) -> None:
         """Reject a `PLL` VCO frequency outside DS1239E Table 3-18's band.
 
         `FVCOMIN` 650 MHz .. `FVCOMAX` 1300 MHz, **inclusive at both ends**:
         the datasheet limits are attainable values, not open bounds.  This is
         the `S7` check; the base class's `FCLKIN` 3..`FINMAX` range check is a
         different thing about a different pin and is left exactly as it is.
+
+        **One measured exception.**  The band is the region the datasheet
+        specifies and the region this device's charge-pump model was fitted
+        over -- not a statement that nothing else can be packed (`DEV-009`).
+        This project's own desktop core runs its three PLLs at 1350, 1485 and
+        2000 MHz, where the vendor's tools warn and build anyway, and those
+        three points were measured back out of the vendor's own bitstream
+        (`gw5ast138c_pll_pump.MEASURED_ABOVE_BAND`).  A point that is not one
+        of them is still refused: the pump model will not extrapolate, so
+        packing it would mean emitting a guessed loop filter.
         """
+        if (fref is not None
+                and pll_pump.measured_above_band(fref, fvco) is not None):
+            return
         min_vco = self.get_permitted_pll_freqs()[4]
         max_vco = self.get_permitted_pll_freqs()[3]
         if fvco < min_vco or fvco > max_vco:
