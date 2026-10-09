@@ -7416,10 +7416,20 @@ class GW5AST_138C(GW5A):
         The base handler models the pre-5A `CLKODDRMUX_*` shape, which on this
         die costs no fuse at all, so an output gearbox came out of it with its
         `FCLK` unselected -- the two-bit gap `P3.T13` measured.
+
+        The `LSRIMUX_0` the shared handler also emits belongs to the *input*
+        half (`LSRIMUX` against the output's `LSROMUX`), so an output cell
+        carrying it spends a fuse the vendor does not.  MEASURED against the
+        vendor's own build of this project's desktop core, whose display works:
+        `LSRIMUX_0` is set in ours and clear in theirs, one fuse per tile, the
+        only difference found at the TMDS tiles -- and the TMDS tiles are
+        `OSER10`s.  It is the same attribute the `IDDRC` override below drops
+        for the same reason.
         """
-        return (super().get_out_iologic_attrs(bel)
-                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
-                + self.oser16_aux_attrs(bel))
+        attrs = (super().get_out_iologic_attrs(bel)
+                 + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
+                 + self.oser16_aux_attrs(bel))
+        return [av for av in attrs if av.attr != 'LSRIMUX_0']
 
     def get_IOLOGIC_DUMMY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         """ The aux half of a narrow output gearbox costs this die no fuse.
