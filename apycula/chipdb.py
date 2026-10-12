@@ -597,6 +597,20 @@ def fse_clock_pips_138(fse, ttyp, device):
             # 277 as source is VCC
             if srcid == 277:
                 src = 'VCC'
+            # A top-edge PLL's clock wire enters the plane only through the
+            # TOP bridge inputs; the TOP bridge outputs feed both halves.
+            # MEASURED (TinyNES core-log entry 5): PLL_R[0] CLKOUT0 routed
+            # `(54, 88) SPINE16 <= TRPLL0CLK0` -> CBRIDGEOUT_BOTTOM0 is silent
+            # on hardware; the same route re-entered at
+            # `(54, 93) SPINE10 <= TRPLL0CLK0` -> CBRIDGEOUT_TOP2 runs, with
+            # every other fuse unchanged.  Only SPINE16 is measured dead (a
+            # vendor compile once used SPINE20 from this wire); the rest of the
+            # BOTTOM entries are dropped too because the TOP entries reach
+            # every spine the BOTTOM ones do.
+            if (device == 'GW5AST-138C' and re.fullmatch(r'T[LR]PLL\dCLK\d', src)
+                    and dest.startswith('SPINE')
+                    and (gw5_clock_plane_half(device, dest) or ('',))[0] == 'BOTTOM'):
+                continue
             pips.setdefault(dest, {})[src] = fuses
     return pips
 
@@ -2974,9 +2988,14 @@ _gw5a_pll_macros = {
 #: same evidence shows the bottom-edge sites have no clock wire of their own at
 #: all and the vendor takes their output onto the plane through a
 #: logic-to-clock gate, which every site can do.
+#:
+#: `PLL_R[0]` `CLKOUT0` is MEASURED the same way: a vendor compile of the
+#: TinyNES AE350 gate drives the AE350 bus clocks from it and programs
+#: `(54, 88) SPINE20 <= TRPLL0CLK0`.
 _gw5a_pll_clk_wires = {
     'GW5AST-138C': {
         (0, 'CLKOUT0'): 'TLPLL0CLK0',
+        (4, 'CLKOUT0'): 'TRPLL0CLK0',
     },
 }
 
