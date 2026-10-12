@@ -7482,12 +7482,85 @@ class GW5AST_138C(GW5A):
         removal was scoped to, which left the three TMDS `OSER10`s as the only
         IOLOGICs on the die without it.
         """
-        return (super().get_out_iologic_attrs(bel)
+        attr_vals = [av for av in super().get_out_iologic_attrs(bel)
+                     if not (bel.cell.typ == 'OSER10' and av.attr == 'LSROMUX_0')]
+        if bel.cell.typ == 'OSER10' and not any(av.attr == 'HWL' for av in attr_vals):
+            attr_vals.append(AttrVal('HWL', 'TRUE'))
+        if bel.cell.typ == 'ODDR':
+            # MEASURED (TinyTang core-log entry 38): the vendor's ODDR carries
+            # LSROMUX_0 like its ODDRC -- at (108,52), tile type 247, the four
+            # fuses tests/test_io_iologic_138c.py holds, and at the right-edge
+            # TMDS cells.  The base handler's int 0 has no row, so it was
+            # dropped and the table's negative-key fuse ((21,66) on 247,
+            # (11,134) on 245/232) was written instead: with that fuse set an
+            # ODDR-driven HDMI output stayed dark on the board, without it the
+            # picture came up.  The name '0' is value id 1, the row that exists.
+            attr_vals = [AttrVal('LSROMUX_0', '0') if av.attr == 'LSROMUX_0' else av
+                         for av in attr_vals]
+        return (attr_vals
                 + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
+                + self.fclk_lane_attrs(bel)
                 + self.oser16_aux_attrs(bel))
 
+    def fclk_lane_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The second fast-clock selector pair: `FCLKSEL0` and `FCLKSEL3`.
+
+        MEASURED (TinyTang core-log entries 37 and 38, decoded with
+        `gowin_unpack` from Gowin EDA 1.9.11.03 builds and proven on the
+        board): a vendor `OSER10` whose `FCLK` arrives on lane 0 of its HCLK
+        block carries `FCLKSEL0=HCLK0` and `FCLKSEL3=HCLK0_` on BOTH halves of
+        its pad pair, on top of the `FCLKSEL1`/`FCLKSEL2` pair above -- at
+        (57,181), (100,181) and (102,181), at the bottom-edge (108,52) as well,
+        and whether the pad drives an `ELVDS_OBUF` or a plain `OBUF`.  Without
+        them the TinyTang desktop core's TMDS serialisers produced no signal;
+        with them (and the rest of entry 37's fuses) HDMI comes up.
+
+        A lane-2 gearbox carries neither: `FCLKSEL0` has rows only for
+        `HCLK0`, `HCLK1` and `HCLK3`, `FCLKSEL3` only for `HCLK0` and
+        `HCLK0_`, and the vendor's lane-2 `OSER4` and `OSER10` (`P3.T13`,
+        `shapes/io_ser.py`, rebuilt for entry 38) decode with `FCLKSEL1`/
+        `FCLKSEL2` alone.  Lanes 1 and 3 are not measured and get nothing; the
+        router does not offer them to an IOLOGIC (`fclk_select_attrs`).
+
+        The lane is the one `nextpnr` reports, so this is only as right as the
+        chipdb's cell-to-block map.  KNOWN WRONG at (57,181) (TinyTang
+        core-log entry 38): `io2hclk` serves that cell from HCLK block 1, the
+        router takes its FCLK through block 1 lane 2 and this writes no
+        lane-0 bits -- and the TMDS output is blank -- while the vendor serves
+        it from block 3 lane 0 and the board shows a picture only with
+        `FCLKSEL0=HCLK0`/`FCLKSEL3=HCLK0_` set there.  TinyTang adds those four
+        fuses by hand until the map is corrected.
+        """
+        if self._fclk_lane.get(bel.fclk) != 0:
+            return []
+        return [AttrVal('FCLKSEL0', 'HCLK0'), AttrVal('FCLKSEL3', 'HCLK0_')]
+
+    def oser10_aux_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The `B` half of an `OSER10`: the vendor configures it fully.
+
+        MEASURED (TinyTang core-log entry 38): with Gowin EDA 1.9.11.03 the
+        aux `IOLOGICB` of every `OSER10` decoded -- the three right-edge TMDS
+        serialisers, a single-ended `OBUF` variant of them, the bottom-edge
+        ball AA9 at (108,53), and this repository's own `io_ser`
+        `oser10-default` shape rebuilt as generated -- carries `CLKOMUX=ENABLE`,
+        `LSRIMUX_0`, `OCLKCE=CE`, `WRFCLKSEL=UNK102` and the same four
+        `FCLKSEL` values as the main half, and no `OUTMODE`, `ISI` or
+        `LSROMUX_0`.  The vendor also refuses any other cell on the pair's `B`
+        pad beside an `OSER10`.  This retracts `84dddea`'s finding for
+        `OSER10` ("the vendor leaves the aux cell's `IOLOGICB` completely
+        clear"): rebuilt today the same shape shows the opposite, and the
+        TinyTang desktop core's HDMI works only with these fuses written.
+        `OSER8` and `OVIDEO` were not re-measured and keep the earlier rule.
+        """
+        return ([AttrVal('CLKOMUX', 'ENABLE'), AttrVal('LSRIMUX_0', '0'),
+                 AttrVal('OCLKCE', 'CE')]
+                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
+                + self.fclk_lane_attrs(bel))
+
     def get_IOLOGIC_DUMMY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        """ The aux half of a narrow output gearbox costs this die no fuse.
+        """ The aux half of a narrow output gearbox costs this die no fuse --
+        except an `OSER10`'s, which the vendor configures (`oser10_aux_attrs`,
+        TinyTang core-log entry 38).
 
         MEASURED (`P3.F3`, the vendor's `OSER8`, `OSER10` and `OVIDEO` at the
         pad pair (108, 52)): the vendor leaves the aux cell's `IOLOGICB`
@@ -7503,7 +7576,12 @@ class GW5AST_138C(GW5A):
         `P3.T16a`), and it arrives here as `DDRENABLE16`.
         """
         if bel.cell.parms.get('OUTMODE') == 'DDRENABLE':
-            return []
+            main_name = bel.cell.attrs.get('MAIN_CELL')
+            if main_name is None or self.pnr.get_cell(main_name).typ != 'OSER10':
+                return []
+            iol_bel = self.set_iologic_bel_fclk(self.make_IologicBelDesc(bel))
+            av = self.set_iologic_attrvals(iol_bel, self.oser10_aux_attrs(iol_bel))
+            return self.iologic_fuse_bits(iol_bel, av)
         return super().get_IOLOGIC_DUMMY_fuses(bel)
 
     @staticmethod

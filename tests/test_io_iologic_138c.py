@@ -739,3 +739,56 @@ def test_io16_aux_half_still_configures_on_138c():
         else:
             del GW5A.get_IOLOGIC_DUMMY_fuses
     assert reached is sentinel
+
+
+
+# --- TinyTang core-log entry 38: OSER10 both halves, ODDR LSROMUX_0 ----------
+# Measured from Gowin EDA 1.9.11.03 builds of TinyTang's fpga/hdmi_test/ core
+# (right-edge TMDS cells and ball AA9) and of shapes/io_ser.py's
+# oser10-default, decoded with gowin_unpack, and proven on the board: the
+# open-flow HDMI core shows a picture only with these.
+
+def _oser10_bel(fclk="SPINE10"):
+    bel = _iologic_bel("OSER10", {"OUTMODE": "ODDRX5"})
+    return type(bel)(bel.x, bel.y, bel.idx_str, bel.cell, fclk, "ODDRX5", None)
+
+
+def test_oser10_main_half_carries_hwl_and_no_lsromux():
+    from apycula.gowin_pack import GW5AST_138C
+
+    device = object.__new__(GW5AST_138C)
+    emitted = {(av.attr, str(av.val)) for av in device.get_out_iologic_attrs(_oser10_bel())}
+    assert ("HWL", "TRUE") in emitted
+    assert not [a for a, _ in emitted if a == "LSROMUX_0"]
+
+
+def test_lane0_gearbox_adds_fclksel0_and_fclksel3():
+    from apycula.gowin_pack import GW5AST_138C
+
+    device = object.__new__(GW5AST_138C)
+    lane0 = {(av.attr, str(av.val)) for av in device.get_out_iologic_attrs(_oser10_bel("SPINE10"))}
+    assert {("FCLKSEL0", "HCLK0"), ("FCLKSEL3", "HCLK0_"),
+            ("FCLKSEL1", "HCLK0"), ("FCLKSEL2", "HCLK0_")} <= lane0
+    lane2 = {av.attr for av in device.get_out_iologic_attrs(_oser10_bel("SPINE12"))}
+    assert not lane2 & {"FCLKSEL0", "FCLKSEL3"}
+
+
+def test_oser10_aux_half_is_configured_like_the_vendors():
+    from apycula.gowin_pack import GW5AST_138C
+
+    device = object.__new__(GW5AST_138C)
+    aux = {(av.attr, str(av.val)) for av in device.oser10_aux_attrs(_oser10_bel())}
+    assert {("CLKOMUX", "ENABLE"), ("LSRIMUX_0", "0"), ("OCLKCE", "CE"),
+            ("WRFCLKSEL", "UNK102"), ("FCLKSEL0", "HCLK0"), ("FCLKSEL1", "HCLK0"),
+            ("FCLKSEL2", "HCLK0_"), ("FCLKSEL3", "HCLK0_")} == aux
+
+
+@pytest.mark.parametrize("ttyp,vendor", [
+    (247, {(20, 59), (21, 54), (21, 112), (21, 113)}),
+    (232, {(5, 129), (8, 127), (10, 120), (10, 132)}),
+    (245, {(5, 129), (8, 127), (10, 120), (10, 132)}),
+])
+def test_oddr_fuses_match_the_vendor_on_both_edges(ttyp, vendor):
+    from apycula.gowin_pack import GW5AST_138C
+
+    assert _fuses_for(GW5AST_138C, "ODDR", {"OUTMODE": "ODDRX1"}, ttyp=ttyp) == vendor
