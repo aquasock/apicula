@@ -1340,22 +1340,30 @@ def gw5_hclk_arcs(dev, device, fse):
       per-side order is the vendor's own `INS_LOC` convention (SUG1018 sec 2.9,
       `LEFTSIDE[0..3]` = the first block of the left side, `[4..7]` = the
       second; `P1.T08d` measured all twenty-four positions);
-    * the boundary between two blocks of one side: the *inter-HCLK bridge*
-      cell between them when the `.fse` puts one there -- a cell carrying
-      table 48 without being a block -- and the midpoint between the two block
-      cells when it does not.
+    * the boundary between two blocks of one side: the midpoint between the
+      two block cells.  The *inter-HCLK bridge* cells (cells carrying table 48
+      without being a block) are NOT boundaries, although they once were used
+      as such.
 
-    On the GW5AST-138C the left and right sides each have their bridge at row
-    63, so their boundary is measured; the bottom side's two blocks (columns 64
-    and 117) have no bridge between them -- its one interior bridge, (108,118),
-    lies beyond both -- so the bottom boundary is the midpoint, column 90/91.
-    Every block cell then falls inside its own arc, which is the property the
-    GW5A-25A's hand-traced arcs have and the check this derivation is held to.
+    MEASURED (TinyTang core-log entry 39): Gowin EDA 1.9.11.03 builds of a
+    single `OSER10` fed from a right-edge `CLKDIV` in block 3, decoded with
+    `gowin_unpack`, swept down both long sides of the GW5AST-138C.  On the
+    right edge, rows 41, 43, 46, 48, 50 and 52 made the vendor carry the lane
+    into block 1 (`HCLK_MUX_GAMMA10` <- inter-HCLK wire 207) and rows 55, 57,
+    59, 61 and 64 used block 3 alone; on the left edge, rows 46 to 52 used
+    block 0 and rows 55 to 61 block 2.  Rows 53 and 54 cannot hold an
+    `OSER10` in the PBGA484A, so the boundary is measured to lie in (52, 55]
+    -- which the midpoint, row 54, satisfies on both sides -- and NOT at the
+    row-63 bridge, which put rows 55 to 63 in the wrong block: (57,181), the
+    TinyTang desktop core's red TMDS serialiser, was routed through block 1
+    lane 2 and its HDMI output was blank.  The bottom side's two blocks
+    (columns 64 and 117) give column 90/91, not yet measured.  Every block
+    cell falls inside its own arc, which is the property the GW5A-25A's
+    hand-traced arcs have and the check this derivation is held to.
 
-    Cross-checked against the one vendor gearbox bitstream on this die
-    (`$OTC/evidence/oser/attr-audit.json`): its `OSER4` sits at `IOR51A`, cell
-    (50, 181), which this walk puts in block 1 -- the first block of the right
-    side, the one whose `FCLKSEL1=HCLK2` fuse the vendor set.
+    The vendor `OSER4` at `IOR51A`, cell (50, 181), (`$OTC/evidence/oser/
+    attr-audit.json`) is in block 1 under both rules, and the sweep above
+    confirms it.
 
     The GW5A-25A keeps its own literals: its arcs cross corners, which no rule
     reading this die's tables reproduces, so replacing them would be a change
@@ -1363,7 +1371,6 @@ def gw5_hclk_arcs(dev, device, fse):
     """
     arcs = {}
     blocks = {}
-    bridges = {}
     for row in range(dev.rows):
         for col in range(dev.cols):
             side_pos = gw5_die_side(dev, row, col)
@@ -1373,18 +1380,12 @@ def gw5_hclk_arcs(dev, device, fse):
             if gw5_hclk_idx(dev, device, row, col) >= 0:
                 blocks.setdefault(side, []).append(
                         (pos, gw5_hclk_idx(dev, device, row, col)))
-            else:
-                bridges.setdefault(side, []).append(pos)
 
     boundaries = {}
     for side, side_blocks in blocks.items():
         side_blocks.sort()
-        side_bounds = []
-        for (pos_a, _), (pos_b, _) in zip(side_blocks, side_blocks[1:]):
-            between = [b for b in bridges.get(side, []) if pos_a < b < pos_b]
-            side_bounds.append(between[0] if len(between) == 1
-                               else (pos_a + pos_b) / 2)
-        boundaries[side] = side_bounds
+        boundaries[side] = [(pos_a + pos_b) / 2 for (pos_a, _), (pos_b, _)
+                            in zip(side_blocks, side_blocks[1:])]
 
     for row in range(dev.rows):
         for col in range(dev.cols):

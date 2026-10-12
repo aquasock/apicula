@@ -662,6 +662,20 @@ def test_io2hclk_places_the_vendor_oser4_cell_in_block_one(db_138c):
             "HCLK10", "HCLK11", "HCLK12", "HCLK13"]
 
 
+def test_io2hclk_long_side_boundary_is_the_block_midpoint(db_138c):
+    """MEASURED (TinyTang core-log entry 39): a vendor `OSER10` swept down
+    both long sides is served by the upper block at rows 41 to 52 and by the
+    lower block at rows 55 to 64 -- not split at the row-63 bridge, which put
+    (57, 181), the TinyTang desktop core's red TMDS serialiser, in block 1."""
+    measured = {181: ({41, 43, 46, 48, 50, 52}, 1, {55, 57, 59, 61, 64}, 3),
+                0: ({46, 48, 50, 52}, 0, {55, 57, 59, 61}, 2)}
+    for col, (upper, upper_idx, lower, lower_idx) in measured.items():
+        for row in upper:
+            assert (row, col) in db_138c.io2hclk[upper_idx], (row, col)
+        for row in lower:
+            assert (row, col) in db_138c.io2hclk[lower_idx], (row, col)
+
+
 def test_gw5ast138c_out_iologic_selects_the_measured_fclk_fuses():
     """`FCLKSEL1`/`FCLKSEL2` are the two bits the packer used to miss."""
     from apycula.gowin_pack import GW5AST_138C

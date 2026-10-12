@@ -7523,13 +7523,14 @@ class GW5AST_138C(GW5A):
         router does not offer them to an IOLOGIC (`fclk_select_attrs`).
 
         The lane is the one `nextpnr` reports, so this is only as right as the
-        chipdb's cell-to-block map.  KNOWN WRONG at (57,181) (TinyTang
-        core-log entry 38): `io2hclk` serves that cell from HCLK block 1, the
-        router takes its FCLK through block 1 lane 2 and this writes no
-        lane-0 bits -- and the TMDS output is blank -- while the vendor serves
-        it from block 3 lane 0 and the board shows a picture only with
-        `FCLKSEL0=HCLK0`/`FCLKSEL3=HCLK0_` set there.  TinyTang adds those four
-        fuses by hand until the map is corrected.
+        chipdb's cell-to-block map (`chipdb.gw5_hclk_arcs`).  That map once
+        served (57,181) from HCLK block 1, so the router took its FCLK through
+        block 1 lane 2, this wrote no lane-0 bits and the TMDS output was
+        blank, while the vendor serves it from block 3 lane 0; the boundary
+        was corrected from the row-63 bridge to the block midpoint after a
+        vendor sweep (TinyTang core-log entry 39).  With the corrected map the
+        router gave all three of that core's TMDS serialisers block 3 lane 2,
+        which carries no lane-0 bits, and HDMI came up on the board.
         """
         if self._fclk_lane.get(bel.fclk) != 0:
             return []
