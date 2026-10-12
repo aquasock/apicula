@@ -5464,6 +5464,19 @@ def _ae350_output_records(ins_table, outs_table, first_in, last_in):
             yield outs_table[bit]
 
 
+def _ae350_measured_output_records():
+    """The 138C output taps from the vendor-measured map, in output-bit order.
+
+    Records use the `.dat` convention -- 1-based row and column, wire index --
+    so they go through `_ae350_tap` like any table record.
+    """
+    from apycula.ae350_138c_outputs import AE350_SOC_OUTPUT_TAPS_138C as taps
+    numbers = {name: idx for idx, name in wnames.wirenames.items()}
+    for port in _ae350_port_bits(_AE350_SOC_OUTPUTS):
+        row, col, wire = taps[port]
+        yield (row + 1, col + 1, numbers[wire])
+
+
 def fse_create_ae350(dev, device, dat):
     """Register the `AE350_SOC` hard block's bel and fabric port map.
 
@@ -5496,8 +5509,10 @@ def fse_create_ae350(dev, device, dat):
         (_AE350_SOC_INPUTS,
          _ae350_input_records(outs_table, grid_rows, grid_cols),
          'AE350_IN', ins),
+        # The table-derived output map is MEASURED wrong on this device (2 of
+        # 495 bits agree with the vendor), so the measured map replaces it.
         (_AE350_SOC_OUTPUTS,
-         list(_ae350_output_records(ins_table, outs_table, first_in, last_in)),
+         list(_ae350_measured_output_records()),
          'AE350_OUT', outs),
     )
     for ports, table, wire_type, pins in directions:
