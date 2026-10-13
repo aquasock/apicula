@@ -502,6 +502,23 @@ def _gw5_logic_clock_gate_ids():
     return range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
 
 
+# Bridge-output -> spine pips that is_allowed_spine_input admits but that clock
+# nothing on the GW5AST-138C.  MEASURED (TinyNES core-log entry 14): over four
+# placement seeds of one design, every flip-flop whose clock branch was fed
+# from `(27, 94) SPINE17 <= CBRIDGEOUT_BOTTOM0` or `(27, 94) SPINE18 <=
+# CBRIDGEOUT_BOTTOM2` held 0 for good, and every one fed from `SPINE26 <=
+# CBRIDGEOUT_BOTTOM2` at (27, 96) and (81, 96) ran (32 of 32).  `SPINE25 <=
+# CBRIDGEOUT_BOTTOM0` was on the silent AE350 route of TinyNES core-log entry
+# 5.  Lead, not finding: a Gowin IDE 1.9.11.03 build with the same clock takes
+# `(27, 94) SPINE16 <= CBRIDGEOUT_BOTTOM3` and then taps SPINE19, so the
+# (27, 94) bridge outputs look permuted against the spines they are named for.
+_gw5ast138c_dead_bridge_pips = {
+    ('SPINE17', 'CBRIDGEOUT_BOTTOM0'),
+    ('SPINE18', 'CBRIDGEOUT_BOTTOM2'),
+    ('SPINE25', 'CBRIDGEOUT_BOTTOM0'),
+}
+
+
 def fse_clock_pips_138(fse, ttyp, device):
     clock_MUX_tables = [_wire_tables['CLOCK_MUX_TOP'], _wire_tables['CLOCK_MUX_BOTTOM']]
 
@@ -561,6 +578,8 @@ def fse_clock_pips_138(fse, ttyp, device):
                     elif ttyp not in bridge_tile_types_138:
                         if not src.startswith('CBRIDGEOUT') or not is_allowed_spine_input(src, dest):
                             continue
+                        if device == 'GW5AST-138C' and (dest, src) in _gw5ast138c_dead_bridge_pips:
+                            continue
                     else:
                         continue
 
@@ -610,6 +629,17 @@ def fse_clock_pips_138(fse, ttyp, device):
             if (device == 'GW5AST-138C' and re.fullmatch(r'T[LR]PLL\dCLK\d', src)
                     and dest.startswith('SPINE')
                     and (gw5_clock_plane_half(device, dest) or ('',))[0] == 'BOTTOM'):
+                continue
+            # An HCLK block's CLKDIV escape wires 105..112 (lanes 0 and 1)
+            # enter only at `(54, 88) SPINE18`, whose CBRIDGEOUT_BOTTOM2
+            # reaches SPINE26 (see _gw5ast138c_dead_bridge_pips).  MEASURED
+            # (TinyNES core-log entry 14): a RIGHTSIDE[4] CLKDIV (wire 111)
+            # entering only there clocked every flip-flop in two seeds; entering
+            # at `(54, 88) SPINE16` fed the dead CBRIDGEOUT_BOTTOM0 spines, and
+            # entering at `(54, 93) SPINE9` (CBRIDGEOUT_TOP1) clocked nothing
+            # in eight seeds.  The other entries are unmeasured.
+            if (device == 'GW5AST-138C' and srcid in range(105, 113)
+                    and dest.startswith('SPINE') and dest != 'SPINE18'):
                 continue
             pips.setdefault(dest, {})[src] = fuses
     return pips
