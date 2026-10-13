@@ -20,7 +20,7 @@ all: apycula/GW1N-1.msgpack.xz apycula/GW1N-9.msgpack.xz apycula/GW1N-4.msgpack.
 	 apycula/GW5AST-138C.msgpack.xz apycula/GW5AT-60B.msgpack.xz
 
 BUILDER_DEPS = apycula/chipdb_builder.py apycula/fse_parser.py apycula/dat_parser.py \
-               apycula/tm_parser.py apycula/chipdb.py
+               apycula/tm_parser.py apycula/chipdb.py apycula/ae350_138c_timing.py
 
 apycula/%.msgpack.xz: $(BUILDER_DEPS)
 	python3 -m apycula.chipdb_builder $*

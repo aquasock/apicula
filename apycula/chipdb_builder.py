@@ -405,6 +405,11 @@ def main():
     db = chipdb.from_fse(device, fse, dat)
     chipdb.set_banks(fse, dat, db)
     db.timing = tm
+    if device == "GW5AST-138C":
+        # The .tm carries no AE350 group; the measured one stands in for it.
+        from apycula.ae350_138c_timing import ae350_timing_group
+        for groups in db.timing.values():
+            groups['ae350'] = ae350_timing_group()
     chipdb.fse_wire_delays(db, params['device'])
     db.packages, db.pinout, _ = chipdb.json_pinout(device)
 
