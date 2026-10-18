@@ -576,7 +576,12 @@ def fse_clock_pips_138(fse, ttyp, device):
                         # A gate name is per half, here and in the bridge.
                         src = mk_clock_wname(device, src, half)
                     elif ttyp not in bridge_tile_types_138:
-                        if not src.startswith('CBRIDGEOUT') or not is_allowed_spine_input(src, dest):
+                        # EXPERIMENT 2026-10-18: trust the vendor row.  The
+                        # measured-dead list below still drops the three pips
+                        # that do not clock; the hardcoded permutation was a
+                        # measurement of the other rows and is being tested
+                        # against the vendor table instead of assumed.
+                        if not src.startswith('CBRIDGEOUT'):
                             continue
                         if device == 'GW5AST-138C' and (dest, src) in _gw5ast138c_dead_bridge_pips:
                             continue
