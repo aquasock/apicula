@@ -516,6 +516,14 @@ _gw5ast138c_dead_bridge_pips = {
     ('SPINE17', 'CBRIDGEOUT_BOTTOM0'),
     ('SPINE18', 'CBRIDGEOUT_BOTTOM2'),
     ('SPINE25', 'CBRIDGEOUT_BOTTOM0'),
+    # MEASURED 2026-10-18: the I2C core's `clk` route took these two pairs,
+    # loaded, and answered nothing on UART1 (`fpga: no answer`); the working
+    # seed-26 route uses (`SPINE16`, `CBRIDGEOUT_TOP0`) at X94 and
+    # (`SPINE25`, `CBRIDGEOUT_TOP2`) at X96 instead.  Drop the unproven TOP0
+    # pairs so the router falls back to the proven ones; only the two bridge
+    # cells (27,94)/(81,94) and (27,96)/(81,96) carry them.
+    ('SPINE18', 'CBRIDGEOUT_TOP0'),
+    ('SPINE25', 'CBRIDGEOUT_TOP0'),
 }
 
 
@@ -556,6 +564,13 @@ def fse_clock_pips_138(fse, ttyp, device):
                 # 277 as source is VCC
                 if srcid == 277:
                     src = 'VCC'
+                # MEASURED: every observed route into SPINE17 clocks nothing on
+                # the GW5AST-138C -- BOTTOM0 (TinyNES core-log entry 14), TOP2
+                # (desktop seeds 6 and 16) and TOP0 (the I2C netlist, all eight
+                # seeds).  The source differs, the destination does not, so drop
+                # the destination.  TOOL-017 records the board failures.
+                if device == 'GW5AST-138C' and dest == 'SPINE17':
+                    continue
                 # Spines as sources can only have a GT00 (291) and GT10 (292) as sinks
                 if src.startswith('SPINE'):
                     if destid not in {291, 292}:
@@ -605,6 +620,10 @@ def fse_clock_pips_138(fse, ttyp, device):
                 srcid = -srcid
             src = wnames.clknames[srcid]
             dest = wnames.clknames[destid]
+            # Same measured-dead destination as the bridge loop above; the
+            # central clock mux must not be a second way into SPINE17.
+            if device == 'GW5AST-138C' and dest == 'SPINE17':
+                continue
             # XXX skip 6 and 7 for now
             if srcid in range(wnames.clknumbers['P16A'], wnames.clknumbers['P47D'] + 1):
                 continue
