@@ -4864,20 +4864,29 @@ def fse_create_spine_select_wires(dev, device):
     dev.spine_select_wires = {}
     if device in {'GW5AST-138C'}:
         dev.last_top_row = 54
+        # The last field is the constant a port must hold for the spine to
+        # clock: 0 is VSS, 1 is VCC.  MEASURED for SPINE19 (TinyTang
+        # core-log entry 94): a Gowin IDE 1.9.11.03 build whose `clk` takes
+        # SPINE19 drives (27, 94) and (81, 94) CLK0 and CLK1 from VSS
+        # (`N210 <= VSS` one row below, then `N211 -> X02 -> CLK0/CLK1`), and
+        # the .fse has no VCC row for a CLK port, so the 1 these entries held
+        # routed to a fuseless pip -- the port was left unprogrammed -- and
+        # every open-flow `clk` route through SPINE17, SPINE18 or SPINE19
+        # loaded dead.  The other spines take the same polarity as a lead.
         top = dev.spine_select_wires.setdefault('top', {})
-        top['SPINE17'] = [(27, 93, 'CLK1', 1)]
-        top['SPINE18'] = [(27, 93, 'CLK0', 1), (27, 93, 'CLK2', 1)]
-        top['SPINE19'] = [(27, 94, 'CLK0', 1), (27, 94, 'CLK1', 1)]
-        top['SPINE20'] = [(27, 93, 'A7', 1), (27, 93, 'A6', 1)]
-        top['SPINE21'] = [(27, 94, 'A6', 1), (27, 94, 'CLK2', 1)]
-        top['SPINE23'] = [(27, 92, 'A7', 1), (27, 92, 'A6', 1)]
+        top['SPINE17'] = [(27, 93, 'CLK1', 0)]
+        top['SPINE18'] = [(27, 93, 'CLK0', 0), (27, 93, 'CLK2', 0)]
+        top['SPINE19'] = [(27, 94, 'CLK0', 0), (27, 94, 'CLK1', 0)]
+        top['SPINE20'] = [(27, 93, 'A7', 0), (27, 93, 'A6', 0)]
+        top['SPINE21'] = [(27, 94, 'A6', 0), (27, 94, 'CLK2', 0)]
+        top['SPINE23'] = [(27, 92, 'A7', 0), (27, 92, 'A6', 0)]
         bottom = dev.spine_select_wires.setdefault('bottom', {})
-        bottom['SPINE17'] = [(81, 93, 'CLK1', 1)]
-        bottom['SPINE18'] = [(81, 93, 'CLK0', 1), (81, 93, 'CLK2', 1)]
-        bottom['SPINE19'] = [(81, 94, 'CLK0', 1), (81, 94, 'CLK1', 1)]
-        bottom['SPINE20'] = [(81, 93, 'A7', 1), (81, 93, 'A6', 1)]
-        bottom['SPINE21'] = [(81, 94, 'A6', 1), (81, 94, 'CLK2', 1)]
-        bottom['SPINE23'] = [(81, 92, 'A7', 1), (81, 92, 'A6', 1)]
+        bottom['SPINE17'] = [(81, 93, 'CLK1', 0)]
+        bottom['SPINE18'] = [(81, 93, 'CLK0', 0), (81, 93, 'CLK2', 0)]
+        bottom['SPINE19'] = [(81, 94, 'CLK0', 0), (81, 94, 'CLK1', 0)]
+        bottom['SPINE20'] = [(81, 93, 'A7', 0), (81, 93, 'A6', 0)]
+        bottom['SPINE21'] = [(81, 94, 'A6', 0), (81, 94, 'CLK2', 0)]
+        bottom['SPINE23'] = [(81, 92, 'A7', 0), (81, 92, 'A6', 0)]
     else:
         dev.last_top_row = dev.rows - 1
 
