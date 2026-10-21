@@ -72,7 +72,8 @@ def _configured(config, typ, parms=None, x=181, y=108):
 
 DIV_CTL_MEASURED = {"DIV_CTL": {0: set(), 1: {(20, 32), (20, 63)},
                                 2: {(20, 31), (20, 32), (20, 62), (20, 63)},
-                                3: {(20, 31), (20, 62)}}}
+                                3: {(20, 31), (20, 62)}},
+                    "ADC_MODE": {0: set(), 1: {(20, 14), (20, 45)}}}
 
 
 def test_adc_div_ctl_emits_the_measured_bits():
@@ -88,7 +89,19 @@ def test_adc_default_div_ctl_emits_no_fuse():
     assert _configured(DIV_CTL_MEASURED, "ADCLRC") == []
 
 
-@pytest.mark.parametrize("parm", ["SAMPLE_CNT_SEL", "ADC_MODE", "VSEN_CTL"])
+def test_adc_voltage_mode_emits_the_measured_bits():
+    """The Tang Console battery channel can select voltage mode."""
+    fuses = _configured(DIV_CTL_MEASURED, "ADCLRC", {"ADC_MODE": "1"})
+    assert len(fuses) == 1
+    assert set(fuses[0].bits) == {(20, 14), (20, 45)}
+
+
+def test_adc_temperature_mode_emits_no_fuse():
+    """Temperature mode is the measured zero-fuse default."""
+    assert _configured(DIV_CTL_MEASURED, "ADCLRC", {"ADC_MODE": "0"}) == []
+
+
+@pytest.mark.parametrize("parm", ["SAMPLE_CNT_SEL", "VSEN_CTL"])
 def test_adc_unattributed_parameter_refused_by_name(parm):
     """A parameter no sweep covered is refused, never defaulted silently."""
     with pytest.raises(gowin_pack.PackRefused) as excinfo:
@@ -177,8 +190,9 @@ def test_adc_tile_decodes_without_an_adc_attribute_table():
     from apycula import gowin_unpack
 
     db = _load_138c_chipdb()
-    assert "ADC" not in db.logicinfo, (
-        "this guard is only meaningful while the die has no ADC table")
+    assert not any("ADC" in db.shortval.get(db.grid[row][col], {})
+                   for row, col in ((108, 181), (0, 0))), (
+        "this guard is only meaningful while the ADC sites have no ADC table")
 
     sites = [(row, col)
              for row in range(db.rows) for col in range(db.cols)
@@ -200,13 +214,17 @@ def test_chipdb_carries_the_measured_div_ctl_attribution():
     """
     db = _load_138c_chipdb()
     config = db.extra_func[108, 181]["adc"]["config"]
-    assert set(config) == {"DIV_CTL"}, (
-        "only DIV_CTL was swept; anything else here is a guess")
+    assert set(config) == {"DIV_CTL", "ADC_MODE"}, (
+        "only DIV_CTL and ADC_MODE were swept; anything else here is a guess")
     assert {v: set(map(tuple, b)) for v, b in config["DIV_CTL"].items()} == {
         0: set(),
         1: {(20, 32), (20, 63)},
         2: {(20, 31), (20, 32), (20, 62), (20, 63)},
         3: {(20, 31), (20, 62)},
+    }
+    assert {v: set(map(tuple, b)) for v, b in config["ADC_MODE"].items()} == {
+        0: set(),
+        1: {(20, 14), (20, 45)},
     }
 
 
@@ -238,13 +256,15 @@ class _ConfigDb:
 
 
 DIV_CTL_ON_DIE = {"DIV_CTL": {0: [], 1: [[0, 1]], 2: [[0, 0], [0, 1]],
-                              3: [[0, 0]]}}
+                              3: [[0, 0]]},
+                   "ADC_MODE": {0: [], 1: [[1, 0]]}}
 
 
 def _decode(bits):
     from apycula import gowin_unpack
 
-    tile = [[1 if (0, col) in bits else 0 for col in range(2)]]
+    tile = [[1 if (row, col) in bits else 0 for col in range(2)]
+            for row in range(2)]
     return gowin_unpack._adc_modes_from_config(
         _ConfigDb(DIV_CTL_ON_DIE), 108, 181, tile)
 

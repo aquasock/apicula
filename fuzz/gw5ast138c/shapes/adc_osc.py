@@ -60,6 +60,11 @@ ADC_POINTS = {
     "adclrc-vsen7": ("ADCLRC", 7, {}),
     "adclrc-divctl1": ("ADCLRC", 1, {"DIV_CTL": "2'd1"}),
     "adclrc-divctl3": ("ADCLRC", 1, {"DIV_CTL": "2'd3"}),
+    # Voltage mode is required by the Tang Console's dedicated ADCV pins.
+    # This binary axis attributes ADC_MODE rather than relying on the
+    # primitive default (temperature mode).
+    "adclrc-mode0": ("ADCLRC", 0, {"ADC_MODE": "1'b0"}),
+    "adclrc-mode1": ("ADCLRC", 0, {"ADC_MODE": "1'b1"}),
 }
 
 ADC_BASELINE = "adclrc-temp"

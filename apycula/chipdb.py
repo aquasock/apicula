@@ -2710,8 +2710,7 @@ def _gowin_install_label():
 # `VSENCTL`/`DIV_CTL` diffs move sit in the unattributed `unknown_136`,
 # `unknown_137` and `unknown_138` shortval tables of tiles (108,167),
 # (108,180) and (108,181).  So the bels exist -- placement and routing are
-# modelled -- and `gowin_pack` refuses to *configure* one by name until that
-# attribute sweep is run.
+# modelled -- and `gowin_pack` refuses to *configure* an unswept field by name.
 def _adc_bel_sites(dev):
     """`{bel name: (row, col)}` -- the corner tile that carries each ADC.
 
@@ -2837,6 +2836,12 @@ def fse_create_adc(dev, device, fse, dat):
 #: three of the four values move bits and `DIV_CTL=0` measurably moves none.
 _ADC_DIV_CTL_CODES = {0: None, 1: 57, 2: 58, 3: 59}
 
+#: `ADC_MODE` value -> attribute-value code, measured over its complete
+#: binary axis.  Zero is the primitive's temperature-mode default and moves
+#: no fuse; one selects voltage mode and writes code 56 in both lower-right
+#: configuration tables.  This is the mode used by the dedicated ADCV pins.
+_ADC_MODE_CODES = {0: None, 1: 56}
+
 #: The lower-right block's two configuration tables.  The vendor writes both
 #: on every `ADCLRC` run, so both are emitted; they are unnamed in the `.fse`
 #: and are addressed by the index the parser gave them.
@@ -2846,22 +2851,27 @@ _ADC_LRC_CONFIG_TABLES = ('unknown_137', 'unknown_138')
 def _adc_config_fuses(dev, row, col, tables=_ADC_LRC_CONFIG_TABLES):
     """`{parameter: {value: {bits}}}` for one ADC site, or `{}` if unmeasured.
 
-    Only `DIV_CTL` is attributed: it is the one parameter of the block's
-    seventeen whose axis was swept.  The rest are deliberately absent so the
-    packer refuses them by name rather than emitting a guess (`D30`).
+    Only `DIV_CTL` and `ADC_MODE` are attributed: they are the parameters of
+    the block whose complete axes were swept.  The rest are deliberately
+    absent so the packer refuses them by name rather than emitting a guess
+    (`D30`).
     """
     ttyp = dev.grid[row][col]
     present = dev.shortval.get(ttyp, {})
     if any(name not in present for name in tables):
         return {}
-    div_ctl = {}
-    for value, code in _ADC_DIV_CTL_CODES.items():
-        bits = set()
-        for name in tables:
-            if code is not None:
-                bits.update(map(tuple, present[name].get((code, 0), ())))
-        div_ctl[value] = bits
-    return {'DIV_CTL': div_ctl}
+    config = {}
+    for parameter, codes in (('DIV_CTL', _ADC_DIV_CTL_CODES),
+                             ('ADC_MODE', _ADC_MODE_CODES)):
+        values = {}
+        for value, code in codes.items():
+            bits = set()
+            for name in tables:
+                if code is not None:
+                    bits.update(map(tuple, present[name].get((code, 0), ())))
+            values[value] = bits
+        config[parameter] = values
+    return config
 
 
 def _fse_create_adc_5a138(dev, dat):
