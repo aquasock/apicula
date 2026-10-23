@@ -4,6 +4,7 @@ import importlib.resources
 import itertools
 import json
 import math
+import os
 import re
 import sys
 
@@ -7247,6 +7248,20 @@ class GW5AST_138C(GW5A):
                     f"measured fuse in the table of tile type {ttyp} at "
                     f"X{cfg_x}Y{cfg_y}.")
             bits |= table[key]
+
+        # Measurement switch, off by default.  The vendor baseline sets six
+        # further bits in this corner cell that no parameter sweep moved --
+        # `DLL0` features 5, 17, 18 and 19 plus raw bits (1,12) and (9,13) --
+        # and what they configure is unmeasured.  Setting them answers one
+        # question on hardware: does the primitive need them to produce a tap
+        # code at all?  It is not a default, because packing fuses nobody has
+        # attributed is exactly what this method exists to refuse.
+        if os.environ.get('APICULA_DDRDLL_VENDOR_DEFAULTS') == '1':
+            for code in (5, 17, 18, 19):
+                if (code, 0) in table:
+                    bits |= table[(code, 0)]
+            bits |= {(1, 12), (9, 13)}
+
         return [CellFuseBits(cfg_x, cfg_y, bits)] if bits else []
 
     #==============================
