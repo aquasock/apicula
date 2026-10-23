@@ -420,7 +420,7 @@ class Netlist:
         # Therefore, we will postpone their generation until after normal IOs, once the standard has been clarified.
         yield_later = []
 
-        belre = re.compile(r"X(\d+)Y(\d+)/(?:GSR|LUT|DFF|IOB|MUX|ALU|ODDR|OSC[ZFHWOA]?|BUF[GS]|RAM16SDP4|RAM16SDP2|RAM16SDP1|PLL|IOLOGIC|CLKDIV2|CLKDIV|BSRAM|ALU|MULTALU18X18|MULTALU27X18|MULTALU36X18|MULTADDALU18X18|MULTADDALU12X12|MULT36X36|MULT18X18|MULT12X12|MULT9X9|PADD18|PADD9|BANDGAP|DQCE|DCS|USERFLASH|EMCU|DHCEN|MIPI_OBUF|MIPI_IBUF|DLLDLY|PINCFG|PLLA|ADC|AE350_SOC)(\w*)")
+        belre = re.compile(r"X(\d+)Y(\d+)/(?:GSR|LUT|DFF|IOB|MUX|ALU|ODDR|OSC[ZFHWOA]?|BUF[GS]|RAM16SDP4|RAM16SDP2|RAM16SDP1|PLL|IOLOGIC|CLKDIV2|CLKDIV|BSRAM|ALU|MULTALU18X18|MULTALU27X18|MULTALU36X18|MULTADDALU18X18|MULTADDALU12X12|MULT36X36|MULT18X18|MULT12X12|MULT9X9|PADD18|PADD9|BANDGAP|DQCE|DCS|USERFLASH|EMCU|DHCEN|MIPI_OBUF|MIPI_IBUF|DDRDLL|DLLDLY|PINCFG|PLLA|ADC|AE350_SOC)(\w*)")
         for cell_name, cell_data in self.in_file['modules'][self.top_module_name]['cells'].items():
             cell = self.fill_cell_desc(cell_name, cell_data)
             bel_attr = cell.attrs.get('NEXTPNR_BEL')
@@ -7151,6 +7151,103 @@ class GW5AST_138C(GW5A):
         `gowin_unpack.parse_ae350` recovers it from a pip and not from a fuse.
         """
         return []
+
+    #==============================
+    #========== DDRDLL
+    #==============================
+    def get_DDRDLL_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """The bottom-left `DDRDLL` master, from the vendor's own fuses.
+
+        This primitive is a two-cell macro and the packer has to know it: the
+        port wires land in the column-1 tile of the bottom edge while every
+        configuration fuse sits in the corner cell one column to its left.
+        MEASURED 2026-10-22 against Gowin EDA 1.9.11.03 bitstreams; the
+        reproducible shape and the evidence are in TinyVCMI
+        `tools/ddrdll_oracle/` and `docs/ddr3-open-flow.md`.
+
+        The four parameters map onto `DLL0` short-value features 12 to 15 of
+        the corner tile's own table, and each table entry was confirmed on the
+        bitstream, not inferred from the feature numbering:
+
+        * `CODESCAL` `111` sets features 12's three bits and `000` sets none.
+          The six intermediate codes are present in the table but have not
+          been measured against a bitstream, so they are refused by name
+          rather than guessed from a binary weight.
+        * `SCAL_EN` TRUE is feature 13, `DIV_SEL` 1 is feature 14 and
+          `DLL_FORCE` TRUE is feature 15; all three were isolated one at a
+          time.
+
+        Only the bottom-left master has both a measured port tile and a
+        measured configuration cell. The other three masters exist in silicon
+        and in the corner tables, but their port tiles were not isolated, so
+        this packer refuses them instead of emitting plausible-looking fuses
+        at a cell that may not be the primitive's.
+
+        `LOCK` is not a fuse of this block on any site and is not part of the
+        bitstream decision here; it leaves the primitive on a dedicated path
+        that this model does not yet carry, which is why nextpnr exposes no
+        `LOCK` pin.
+        """
+        rows = self.chipdb.rows
+        if (bel.x, bel.y) != (1, rows - 1):
+            raise PackRefused(
+                f"DDRDLL {bel.cell.name} is placed at X{bel.x}Y{bel.y}; only "
+                f"the bottom-left master at X1Y{rows - 1} has a measured port "
+                f"tile and configuration cell.")
+        cfg_x, cfg_y = 0, rows - 1
+
+        parms = bel.cell.parms
+
+        def flag(name: str, default: str = 'FALSE') -> bool:
+            text = str(parms.get(name, default)).strip().upper()
+            if text in ('TRUE', '1', "1'B1"):
+                return True
+            if text in ('FALSE', '0', "1'B0"):
+                return False
+            raise PackRefused(
+                f"DDRDLL {bel.cell.name}: parameter {name}={text!r} is not a "
+                f"measured boolean.")
+
+        codescal_text = str(parms.get('CODESCAL', '111')).strip().strip('"')
+        if not codescal_text or set(codescal_text) - {'0', '1'}:
+            raise PackRefused(
+                f"DDRDLL {bel.cell.name}: CODESCAL={codescal_text!r} is not "
+                f"a three-bit code.")
+        codescal = int(codescal_text, 2)
+        if codescal not in (0, 7):
+            raise PackRefused(
+                f"DDRDLL {bel.cell.name}: CODESCAL={codescal_text} is not "
+                f"measured. Only 111 and 000 have been isolated on a "
+                f"bitstream; the intermediate codes are in the DLL0 table but "
+                f"their bit weights are not proven.")
+
+        # `DLL0` feature numbers this device's corner tables use, measured.
+        wanted = []
+        if codescal:
+            wanted.append(5 + codescal)  # 0b111 -> feature 12
+        if flag('SCAL_EN'):
+            wanted.append(13)
+        if flag('DIV_SEL'):
+            wanted.append(14)
+        if flag('DLL_FORCE'):
+            wanted.append(15)
+
+        ttyp = self.chipdb.get_ttyp(cfg_x, cfg_y)
+        table = self.chipdb.db.shortval[ttyp].get('DLL0')
+        if table is None:
+            raise PackRefused(
+                f"DDRDLL {bel.cell.name}: tile type {ttyp} at X{cfg_x}Y{cfg_y} "
+                f"carries no DLL0 table.")
+        bits = set()
+        for code in wanted:
+            key = (code, 0)
+            if key not in table:
+                raise PackRefused(
+                    f"DDRDLL {bel.cell.name}: DLL0 feature {code} has no "
+                    f"measured fuse in the table of tile type {ttyp} at "
+                    f"X{cfg_x}Y{cfg_y}.")
+            bits |= table[key]
+        return [CellFuseBits(cfg_x, cfg_y, bits)] if bits else []
 
     #==============================
     #========== Clocks
