@@ -421,7 +421,7 @@ class Netlist:
         # Therefore, we will postpone their generation until after normal IOs, once the standard has been clarified.
         yield_later = []
 
-        belre = re.compile(r"X(\d+)Y(\d+)/(?:GSR|LUT|DFF|IOB|MUX|ALU|ODDR|OSC[ZFHWOA]?|BUF[GS]|RAM16SDP4|RAM16SDP2|RAM16SDP1|PLL|IOLOGIC|CLKDIV2|CLKDIV|BSRAM|ALU|MULTALU18X18|MULTALU27X18|MULTALU36X18|MULTADDALU18X18|MULTADDALU12X12|MULT36X36|MULT18X18|MULT12X12|MULT9X9|PADD18|PADD9|BANDGAP|DQCE|DCS|USERFLASH|EMCU|DHCEN|MIPI_OBUF|MIPI_IBUF|DDRDLL|DLLDLY|PINCFG|PLLA|ADC|AE350_SOC)(\w*)")
+        belre = re.compile(r"X(\d+)Y(\d+)/(?:GSR|LUT|DFF|IOB|MUX|ALU|ODDR|OSC[ZFHWOA]?|BUF[GS]|RAM16SDP4|RAM16SDP2|RAM16SDP1|PLL|IOLOGIC|CLKDIV2|CLKDIV|BSRAM|ALU|MULTALU18X18|MULTALU27X18|MULTALU36X18|MULTADDALU18X18|MULTADDALU12X12|MULT36X36|MULT18X18|MULT12X12|MULT9X9|PADD18|PADD9|BANDGAP|DQCE|DCS|USERFLASH|EMCU|DHCEN|MIPI_OBUF|MIPI_IBUF|DDRDLL|DQS|DLLDLY|PINCFG|PLLA|ADC|AE350_SOC)(\w*)")
         for cell_name, cell_data in self.in_file['modules'][self.top_module_name]['cells'].items():
             cell = self.fill_cell_desc(cell_name, cell_data)
             bel_attr = cell.attrs.get('NEXTPNR_BEL')
@@ -7186,8 +7186,7 @@ class GW5AST_138C(GW5A):
 
         `LOCK` is not a fuse of this block on any site and is not part of the
         bitstream decision here; it leaves the primitive on a dedicated path
-        that this model does not yet carry, which is why nextpnr exposes no
-        `LOCK` pin.
+        to `Q7` of cell (99,1), which nextpnr models as a fuse-free node.
         """
         rows = self.chipdb.rows
         if (bel.x, bel.y) != (1, rows - 1):
@@ -7263,6 +7262,112 @@ class GW5AST_138C(GW5A):
             bits |= {(1, 12), (9, 13)}
 
         return [CellFuseBits(cfg_x, cfg_y, bits)] if bits else []
+
+    #==============================
+    #========== DQS
+    #==============================
+    #: The one measured `DQS`: the strobe block beside pin Y3, whose bel nextpnr
+    #: puts at X5Y81 and whose whole configuration lives in longfuses table 58
+    #: of its byte group's cell, X0Y72.  MEASURED 2026-10-23 against Gowin EDA
+    #: 1.9.11.03 bitstreams, every difference attributed with nothing left
+    #: over; TinyVCMI TOOL-008, `tools/dqs_param_probe.py --check`.  Fuses are
+    #: in that cell's own coordinates.
+    _DQS_SITE = (5, 81)
+    _DQS_CONFIG_CELL = (0, 72)
+    #: set by every vendor design with a DQS, across every parameter and lane
+    #: tried; every one of those designs used the same DQS ports
+    _DQS_PRESENCE = frozenset({(20, 57), (20, 58), (20, 59), (20, 62),
+                               (20, 63), (20, 68), (20, 73), (20, 91)})
+    _DQS_FIFO_MODE_SEL_1 = frozenset({(20, 36), (20, 67)})
+    _DQS_RD_PNTR = ((20, 64), (20, 49), (20, 52))         # bit 0, 1, 2
+    _DQS_MODE = {'X1': frozenset(), 'X2_DDR2': frozenset({(20, 79)}),
+                 'X2_DDR3': frozenset({(20, 78)}),
+                 'X4': frozenset({(20, 78), (20, 79)}),
+                 'X2_DDR3_EXT': frozenset({(20, 78), (20, 90)})}
+    _DQS_HWL_TRUE = frozenset({(20, 103)})
+    #: the HCLK lane `FCLK` rides; lane 0 sets nothing
+    _DQS_FCLK_LANE = {0: frozenset(), 1: frozenset({(20, 53), (20, 56)}),
+                      2: frozenset({(20, 107), (20, 108)}),
+                      3: frozenset({(20, 53), (20, 56), (20, 107), (20, 108)})}
+
+    def get_all_pips_fuses(self, pips: Iterator[PipDesc]) -> list[CellFuseBits]:
+        """Route everything but the DQS's `FCLK` lane pip.
+
+        nextpnr's `HCLK2<n> -> DQS_FCLK` pip at the DQS site has no fuse of
+        its own: the lane it names is written by `get_DQS_fuses` into the byte
+        group's table 58, so it is recorded here and kept out of the chipdb
+        pip lookup, which does not know it.
+        """
+        self._dqs_fclk_src = {}
+        def ordinary():
+            for pip in pips:
+                if pip.dest == 'DQS_FCLK':
+                    self._dqs_fclk_src[(pip.x, pip.y)] = pip.src
+                    continue
+                yield pip
+        return super().get_all_pips_fuses(ordinary())
+
+    def get_DQS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """The one measured `DQS`, from the vendor's own fuses.
+
+        Everything is refused that was not measured: another site, a
+        parameter value outside Gowin's model, and an `FCLK` that is
+        connected but reached the site on no recorded lane.
+        """
+        name = bel.cell.name
+        if (bel.x, bel.y) != self._DQS_SITE:
+            raise PackRefused(
+                f"DQS {name} is placed at X{bel.x}Y{bel.y}; only the DQS beside "
+                f"pin Y3 at X{self._DQS_SITE[0]}Y{self._DQS_SITE[1]} is measured.")
+        parms = bel.cell.parms
+
+        def text(key: str, default: str) -> str:
+            return str(parms.get(key, default)).strip().strip('"').upper()
+
+        def bits_of(key: str, default: str, width: int) -> int:
+            value = text(key, default)
+            if not value or set(value) - {'0', '1'}:
+                raise PackRefused(f"DQS {name}: {key}={value!r} is not a binary value.")
+            number = int(value, 2)
+            if number >> width:
+                raise PackRefused(f"DQS {name}: {key}={value} is wider than {width} bits.")
+            return number
+
+        bits = set(self._DQS_PRESENCE)
+        if bits_of('FIFO_MODE_SEL', '0', 1):
+            bits |= self._DQS_FIFO_MODE_SEL_1
+        rd_pntr = bits_of('RD_PNTR', '000', 3)
+        bits |= {fuse for i, fuse in enumerate(self._DQS_RD_PNTR) if rd_pntr >> i & 1}
+        mode = text('DQS_MODE', 'X1')
+        if mode not in self._DQS_MODE:
+            raise PackRefused(f"DQS {name}: DQS_MODE={mode!r} is not one of "
+                              f"{sorted(self._DQS_MODE)}.")
+        bits |= self._DQS_MODE[mode]
+        hwl = text('HWL', 'FALSE')
+        if hwl not in ('TRUE', 'FALSE'):
+            raise PackRefused(f"DQS {name}: HWL={hwl!r} is not true or false.")
+        if hwl == 'TRUE':
+            bits |= self._DQS_HWL_TRUE
+
+        src = getattr(self, '_dqs_fclk_src', {}).get((bel.x, bel.y))
+        if src is not None:
+            match = re.fullmatch(r'HCLK2([0-3])', src)
+            if not match:
+                raise PackRefused(f"DQS {name}: FCLK arrives on {src}, not a block-2 HCLK lane.")
+            bits |= self._DQS_FCLK_LANE[int(match.group(1))]
+        elif bel.cell.connections.get('FCLK'):
+            raise PackRefused(f"DQS {name}: FCLK is connected but no lane pip reached the site.")
+
+        cfg_x, cfg_y = self._DQS_CONFIG_CELL
+        ttyp = self.chipdb.get_ttyp(cfg_x, cfg_y)
+        table = self.chipdb.db.longfuses.get(ttyp, {}).get('unknown_58')
+        if table is None:
+            raise PackRefused(f"DQS {name}: cell X{cfg_x}Y{cfg_y} carries no longfuses table 58.")
+        known = set().union(*({tuple(f) for f in v} for v in table.values()))
+        if bits - known:
+            raise PackRefused(f"DQS {name}: fuses {sorted(bits - known)} are not in table 58 "
+                              f"of X{cfg_x}Y{cfg_y}.")
+        return [CellFuseBits(cfg_x, cfg_y, bits)]
 
     #==============================
     #========== Clocks
