@@ -436,8 +436,8 @@ class Netlist:
             if cell.typ == 'IOB':
                 bel = IoBelDesc(x, y, idx, cell)
             elif cell.typ in {'IOLOGIC', 'IOLOGICI', 'IOLOGICO', 'IOLOGIC_DUMMY', 'ODDR', 'ODDRC', 'OSER4',
-                   'OSER8', 'OSER10', 'OVIDEO', 'IDDR', 'IDDRC', 'IDES4', 'IDES8', 'IDES10', 'IVIDEO',
-                   'IOLOGICI_EMPTY', 'IOLOGICO_EMPTY'}:
+                   'OSER8', 'OSER8_MEM', 'OSER10', 'OVIDEO', 'IDDR', 'IDDRC', 'IDES4', 'IDES8',
+                   'IDES8_MEM', 'IDES10', 'IVIDEO', 'IOLOGICI_EMPTY', 'IOLOGICO_EMPTY'}:
                 if idx[-1] in 'IO':
                     idx = idx[:-1]
                 bel = IologicBelDesc(x, y, idx, cell, 'UNKNOWN', None, None)
@@ -7814,6 +7814,92 @@ class GW5AST_138C(GW5A):
         if bel.cell.parms.get('OUTMODE') != 'DDRENABLE16':
             return []
         return [AttrVal('OCLKCE', 'CE')]
+
+    #==============================
+    #========== DDR3 lane serializers
+    #==============================
+    #: The ten lane-0 IOLOGIC positions nextpnr models for `OSER8_MEM` and
+    #: `IDES8_MEM`, as (x, y, side): the strobe on Y3 and dq[7:0]/dm[0] of the
+    #: hardware-proven controller's pin map.  MEASURED 2026-10-23 against
+    #: Gowin EDA 1.9.11.03 (TinyVCMI TOOL-009, `tools/dq_lane_probe.py`).
+    _DQ_LANE0_IOLOGIC = frozenset({(0, 68, 'A'),
+                                   (0, 70, 'A'), (0, 70, 'B'), (0, 73, 'A'), (0, 73, 'B'),
+                                   (0, 75, 'A'), (0, 75, 'B'), (0, 77, 'A'), (0, 77, 'B'),
+                                   (0, 79, 'A')})
+
+    def _dq_lane0_check(self, bel: BelDesc) -> None:
+        if (bel.x, bel.y, bel.idx_str) not in self._DQ_LANE0_IOLOGIC:
+            raise PackRefused(
+                f"{bel.cell.typ} {bel.cell.name} is placed at X{bel.x}Y{bel.y} side "
+                f"{bel.idx_str}; only the lane-0 positions of the measured DDR3 lane "
+                f"are modelled.")
+
+    @staticmethod
+    def _fclk_only(attr_vals: list[AttrVal]) -> list[AttrVal]:
+        return [av for av in attr_vals if av.attr.startswith('FCLKSEL')]
+
+    #: Both reset multiplexers at `0`.  The value costs no fuse, but leaving
+    #: the attribute out sets its table's absence entry instead: one fuse each
+    #: the vendor does not set (`(11,1)` and `(11,7)` on side A).
+    _DQ_LSR_DEFAULTS = [AttrVal('LSRIMUX_0', '0'), AttrVal('LSROMUX_0', '0')]
+
+    #: The input half's fast-clock selection per HCLK lane.  MEASURED
+    #: (TinyVCMI TOOL-009, `tools/dq_lane_probe.py` lane designs): the vendor's
+    #: `IDES8_MEM` sets exactly the fuses of `FCLKSEL5=HCLK0` and
+    #: `FCLKSEL3=HCLK0` on lane 0 and none at all on lane 2.  The GW5A
+    #: handler's four-attribute spelling is not used: `FCLKSEL7` has no
+    #: `HCLK0_` row on this die, and that handler emits nothing for an
+    #: `INMODE` it does not list, `MIDDRX4` among them.  Lanes 1 and 3 are
+    #: measured too but the router offers an IOLOGIC lanes 0 and 2 only.
+    _DQ_IN_FCLK = {0: [AttrVal('FCLKSEL5', 'HCLK0'), AttrVal('FCLKSEL3', 'HCLK0')],
+                   2: []}
+
+    def _in_fclk_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        lane = self._fclk_lane.get(bel.fclk)
+        if lane is None:
+            return []
+        if lane not in self._DQ_IN_FCLK:
+            raise PackRefused(f"{bel.cell.typ} {bel.cell.name}: FCLK on HCLK lane {lane}; "
+                              f"only lanes 0 and 2 are modelled for an input serializer.")
+        return list(self._DQ_IN_FCLK[lane])
+
+    def get_OSER8_MEM_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ A lane serializer: `OUTMODE=MODDRX4`, `CLKOMUX`, and `WRFCLKSEL`
+        naming the `DQS` output `TCLK_SOURCE` selects.
+
+        MEASURED (TinyVCMI TOOL-009): those three, plus `TXCLK_POL` and `HWL`
+        when set, are everything the vendor writes for an `OSER8_MEM` outside
+        its fast-clock selection, which is the same lane encoding an `OSER8`
+        gets and is taken from the existing handler.
+        """
+        self._dq_lane0_check(bel)
+        source = str(bel.cell.parms.get('TCLK_SOURCE', 'DQSW')).strip('"').upper()
+        if source not in ('DQSW', 'DQSW270'):
+            raise PackRefused(f"OSER8_MEM {bel.cell.name}: TCLK_SOURCE={source!r} is "
+                              f"neither DQSW nor DQSW270.")
+        iol_bel = self.set_iologic_bel_fclk(self.make_IologicBelDesc(bel))
+        attr_vals = self.common_iologic_handler(iol_bel)
+        attr_vals += self._fclk_only(self.get_out_iologic_attrs(iol_bel))
+        attr_vals += [AttrVal('OUTMODE', 'MODDRX4'), AttrVal('CLKOMUX', 'ENABLE'),
+                      AttrVal('WRFCLKSEL', source)] + self._DQ_LSR_DEFAULTS
+        av = self.set_iologic_attrvals(iol_bel, attr_vals)
+        return self.iologic_fuse_bits(iol_bel, av)
+
+    def get_IDES8_MEM_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ A lane deserializer: `INMODE=MIDDRX4`, `FIFO` and `CLKIMUX`.
+
+        MEASURED (TinyVCMI TOOL-009): with its fast-clock selection, which is
+        the lane encoding an `IDES8` gets, that is everything the vendor
+        writes for an `IDES8_MEM`.
+        """
+        self._dq_lane0_check(bel)
+        iol_bel = self.set_iologic_bel_fclk(self.make_IologicBelDesc(bel))
+        attr_vals = self.common_iologic_handler(iol_bel)
+        attr_vals += self._in_fclk_attrs(iol_bel)
+        attr_vals += [AttrVal('INMODE', 'MIDDRX4'), AttrVal('FIFO', 'ENABLE'),
+                      AttrVal('CLKIMUX', 'ENABLE')] + self._DQ_LSR_DEFAULTS
+        av = self.set_iologic_attrvals(iol_bel, attr_vals)
+        return self.iologic_fuse_bits(iol_bel, av)
 
     #: The `INMODE` parameter `nextpnr` writes for a 16:1 input gearbox, and
     #: the value id this die spends on it.  MEASURED (`P3.T16a`): `IDES16`
