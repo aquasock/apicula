@@ -7319,13 +7319,20 @@ class GW5AST_138C(GW5A):
         nextpnr's `HCLK2<n> -> DQS_FCLK` pip at the DQS site has no fuse of
         its own: the lane it names is written by `get_DQS_fuses` into the byte
         group's table 58, so it is recorded here and kept out of the chipdb
-        pip lookup, which does not know it.
+        pip lookup, which does not know it.  The same holds for the lane-1 and
+        lane-3 `FCLKA`/`FCLKB` pips nextpnr gives the DDR3 lane positions.
         """
         self._dqs_fclk_src = {}
+        lane_cells = {(x, y) for x, y, _ in self._DQ_LANE_IOLOGIC}
         def ordinary():
             for pip in pips:
                 if pip.dest == 'DQS_FCLK':
                     self._dqs_fclk_src[(pip.x, pip.y)] = pip.src
+                    continue
+                # a DDR3 lane serializer's FCLK from lane 1 or 3: no fuse of
+                # its own, the lane is the IOLOGIC's FCLKSEL (`_DQ_OUT_FCLK`)
+                if (pip.dest in ('FCLKA', 'FCLKB') and pip.src in ('HCLK21', 'HCLK23')
+                        and (pip.x, pip.y) in lane_cells):
                     continue
                 yield pip
         return super().get_all_pips_fuses(ordinary())
@@ -8031,18 +8038,29 @@ class GW5AST_138C(GW5A):
     #: `FCLKSEL3=HCLK0` on lane 0 and none at all on lane 2.  The GW5A
     #: handler's four-attribute spelling is not used: `FCLKSEL7` has no
     #: `HCLK0_` row on this die, and that handler emits nothing for an
-    #: `INMODE` it does not list, `MIDDRX4` among them.  Lanes 1 and 3 are
-    #: measured too but the router offers an IOLOGIC lanes 0 and 2 only.
+    #: `INMODE` it does not list, `MIDDRX4` among them.
+    #: Lanes 1 and 3 MEASURED 2026-10-24 (TinyVCMI TOOL-017) on side A of
+    #: every DDR3 lane and side B of lanes 0 and 2: the sets below are the
+    #: spellings whose fuses equal the vendor's on both sides; the table has
+    #: several equal spellings per lane, and `HCLK1` names lane 3 too.
     _DQ_IN_FCLK = {0: [AttrVal('FCLKSEL5', 'HCLK0'), AttrVal('FCLKSEL3', 'HCLK0')],
-                   2: []}
+                   1: [AttrVal('FCLKSEL4', 'HCLK1'), AttrVal('FCLKSEL5', 'HCLK1'),
+                       AttrVal('FCLKSEL6', 'HCLK1'), AttrVal('FCLKSEL7', 'HCLK1_')],
+                   2: [],
+                   3: [AttrVal('FCLKSEL5', 'HCLK1'), AttrVal('FCLKSEL6', 'HCLK1'),
+                       AttrVal('FCLKSEL7', 'HCLK1_')]}
+    #: The output half's selection on lanes 1 and 3, measured the same way;
+    #: lanes 0 and 2 keep the inherited `OSER8` encoding, which matches.
+    _DQ_OUT_FCLK = {1: [AttrVal('FCLKSEL0', 'HCLK1'), AttrVal('FCLKSEL4', 'HCLK1')],
+                    3: [AttrVal('FCLKSEL0', 'HCLK1')]}
 
     def _in_fclk_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
         lane = self._fclk_lane.get(bel.fclk)
         if lane is None:
             return []
         if lane not in self._DQ_IN_FCLK:
-            raise PackRefused(f"{bel.cell.typ} {bel.cell.name}: FCLK on HCLK lane {lane}; "
-                              f"only lanes 0 and 2 are modelled for an input serializer.")
+            raise PackRefused(f"{bel.cell.typ} {bel.cell.name}: FCLK on HCLK lane {lane}, "
+                              f"which no measurement covers.")
         return list(self._DQ_IN_FCLK[lane])
 
     def get_OSER8_MEM_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
@@ -8061,7 +8079,11 @@ class GW5AST_138C(GW5A):
                               f"neither DQSW nor DQSW270.")
         iol_bel = self.set_iologic_bel_fclk(self.make_IologicBelDesc(bel))
         attr_vals = self.common_iologic_handler(iol_bel)
-        attr_vals += self._fclk_only(self.get_out_iologic_attrs(iol_bel))
+        lane = self._fclk_lane.get(iol_bel.fclk)
+        if lane in self._DQ_OUT_FCLK:
+            attr_vals += list(self._DQ_OUT_FCLK[lane])
+        else:
+            attr_vals += self._fclk_only(self.get_out_iologic_attrs(iol_bel))
         attr_vals += [AttrVal('OUTMODE', 'MODDRX4'), AttrVal('CLKOMUX', 'ENABLE'),
                       AttrVal('WRFCLKSEL', source)] + self._DQ_LSR_DEFAULTS
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
