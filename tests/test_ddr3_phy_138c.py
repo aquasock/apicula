@@ -121,3 +121,13 @@ def test_outside_a_context_the_lane_is_still_written(real_db):
     feats = _features(real_db, 'HCLK20', context=False)
     assert {21, 4} <= feats
     assert 5 not in feats
+
+
+def test_the_pll_output_enables_land_where_they_were_measured(real_db):
+    # MEASURED for ENCLK0 and ENCLK2 at PLL_L[0] (TinyVCMI
+    # tools/pll_enclk_probe.py); the rest follow the .dat's PllIn rows 183..189
+    ins = real_db.extra_func[(27, 1)]['pll']['inputs']
+    for i, wire in enumerate(["B6", "B5", "B4", "B3", "B2", "B1", "B0"]):
+        name = ins[f'ENCLK{i}']
+        assert name == f'PLLAENCLK{i}{wire}'
+        assert (27, 4, wire) in real_db.nodes[f'X1Y27/{name}'][1]

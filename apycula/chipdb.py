@@ -3064,6 +3064,20 @@ _gw5a_pll_clk_wires = {
 }
 
 
+#: `PLL` inputs beyond `_plla_inputs`, per device, by `PllIn` row.  The
+#: output enables `ENCLK0`..`ENCLK6` are rows 183..189 of the GW5AST-138C
+#: `.dat`, which run `B6` down to `B0` three columns right of the anchor, in
+#: the primitive's port order.  MEASURED 2026-10-24 for two of them (TinyVCMI
+#: `tools/pll_enclk_probe.py`, `PLL_L[0]` with a `CLKDIV` on the output): a
+#: register on `ENCLK0` or `ENCLK2` is routed to `B6` or `B4` of tile (27,4)
+#: and no PLL fuse moves, and tying it high routes VCC there instead.  The
+#: hardware-proven DDR3 controller stops its memory clock through `ENCLK2`
+#: while it resets its `CLKDIV`; nextpnr routes the pin only for a signal.
+_gw5a_pll_extra_inputs = {
+    'GW5AST-138C': [(183 + i, f'ENCLK{i}') for i in range(7)],
+}
+
+
 def fse_create_slot_plls(dev, device, fse, dat):
     if device not in _gw5a_pll_slots:
         return
@@ -3087,7 +3101,7 @@ def fse_create_slot_plls(dev, device, fse, dat):
         pll_idx = slot_idx
         # inputs
         wire_type = 'PLL_I'
-        for idx, nam in _plla_inputs:
+        for idx, nam in _plla_inputs + _gw5a_pll_extra_inputs.get(device, []):
             if io_table == 'old_style':
                 if not _pll_old_style_present(dat, 'PllIn', idx):
                     continue
