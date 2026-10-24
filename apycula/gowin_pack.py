@@ -7266,29 +7266,30 @@ class GW5AST_138C(GW5A):
     #==============================
     #========== DQS
     #==============================
-    #: The one measured `DQS`: the strobe block beside pin Y3, whose bel nextpnr
-    #: puts at X5Y81 and whose whole configuration lives in longfuses table 58
-    #: of its byte group's cell, X0Y72.  MEASURED 2026-10-23 against Gowin EDA
+    #: The four measured `DQS` sites, one per DDR3 byte lane, as nextpnr
+    #: places them -> the byte group's cell whose longfuses table 58 holds that
+    #: DQS's whole configuration.  MEASURED 2026-10-23 against Gowin EDA
     #: 1.9.11.03 bitstreams, every difference attributed with nothing left
-    #: over; TinyVCMI TOOL-008, `tools/dqs_param_probe.py --check`.  Fuses are
-    #: in that cell's own coordinates.
-    _DQS_SITE = (5, 81)
-    _DQS_CONFIG_CELL = (0, 72)
-    #: set by every vendor design with a DQS, across every parameter and lane
-    #: tried; every one of those designs used the same DQS ports
-    _DQS_PRESENCE = frozenset({(20, 57), (20, 58), (20, 59), (20, 62),
-                               (20, 63), (20, 68), (20, 73), (20, 91)})
-    _DQS_FIFO_MODE_SEL_1 = frozenset({(20, 36), (20, 67)})
-    _DQS_RD_PNTR = ((20, 64), (20, 49), (20, 52))         # bit 0, 1, 2
-    _DQS_MODE = {'X1': frozenset(), 'X2_DDR2': frozenset({(20, 79)}),
-                 'X2_DDR3': frozenset({(20, 78)}),
-                 'X4': frozenset({(20, 78), (20, 79)}),
-                 'X2_DDR3_EXT': frozenset({(20, 78), (20, 90)})}
-    _DQS_HWL_TRUE = frozenset({(20, 103)})
+    #: over; TinyVCMI TOOL-008, TOOL-011, TOOL-012, `tools/dqs_param_probe.py
+    #: --check --lane N`.
+    _DQS_CONFIG_CELLS = {(5, 81): (0, 72),       # lane 0, strobe Y3
+                         (0, 99): (0, 99),       # lane 1, strobe V9
+                         (0, 90): (0, 90),       # lane 2, strobe W6
+                         (6, 81): (0, 63)}       # lane 3, strobe R3
+    #: The encoding as table-58 keys.  The byte groups' cells are of four
+    #: types, 64 for lane 0 and 257, 259 and 270 for the others, which put the
+    #: same keys at different fuse coordinates, so the coordinates come from
+    #: each cell's own table.
+    #: Set by every vendor design with a DQS, across every parameter and lane
+    #: tried; every one of those designs used the same DQS ports.
+    _DQS_PRESENCE = (11, 12, 17, 18, 21, 22, 23, 29)
+    _DQS_FIFO_MODE_SEL_1 = (10, 19)
+    _DQS_RD_PNTR = (13, 14, 15)                            # bit 0, 1, 2
+    _DQS_MODE = {'X1': (), 'X2_DDR2': (31, 35), 'X2_DDR3': (32,), 'X4': (36,),
+                 'X2_DDR3_EXT': (33, 34)}
+    _DQS_HWL_TRUE = (30,)
     #: the HCLK lane `FCLK` rides; lane 0 sets nothing
-    _DQS_FCLK_LANE = {0: frozenset(), 1: frozenset({(20, 53), (20, 56)}),
-                      2: frozenset({(20, 107), (20, 108)}),
-                      3: frozenset({(20, 53), (20, 56), (20, 107), (20, 108)})}
+    _DQS_FCLK_LANE = {0: (), 1: (37, 40), 2: (38, 41), 3: (39, 42)}
 
     def get_all_pips_fuses(self, pips: Iterator[PipDesc]) -> list[CellFuseBits]:
         """Route everything but the DQS's `FCLK` lane pip.
@@ -7308,17 +7309,18 @@ class GW5AST_138C(GW5A):
         return super().get_all_pips_fuses(ordinary())
 
     def get_DQS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        """The one measured `DQS`, from the vendor's own fuses.
+        """A measured `DQS`, from the vendor's own fuses.
 
         Everything is refused that was not measured: another site, a
         parameter value outside Gowin's model, and an `FCLK` that is
         connected but reached the site on no recorded lane.
         """
         name = bel.cell.name
-        if (bel.x, bel.y) != self._DQS_SITE:
+        if (bel.x, bel.y) not in self._DQS_CONFIG_CELLS:
+            sites = ", ".join(f"X{x}Y{y}" for x, y in self._DQS_CONFIG_CELLS)
             raise PackRefused(
-                f"DQS {name} is placed at X{bel.x}Y{bel.y}; only the DQS beside "
-                f"pin Y3 at X{self._DQS_SITE[0]}Y{self._DQS_SITE[1]} is measured.")
+                f"DQS {name} is placed at X{bel.x}Y{bel.y}; only the four DDR3 lane "
+                f"sites are measured ({sites}).")
         parms = bel.cell.parms
 
         def text(key: str, default: str) -> str:
@@ -7333,40 +7335,41 @@ class GW5AST_138C(GW5A):
                 raise PackRefused(f"DQS {name}: {key}={value} is wider than {width} bits.")
             return number
 
-        bits = set(self._DQS_PRESENCE)
+        keys = set(self._DQS_PRESENCE)
         if bits_of('FIFO_MODE_SEL', '0', 1):
-            bits |= self._DQS_FIFO_MODE_SEL_1
+            keys |= set(self._DQS_FIFO_MODE_SEL_1)
         rd_pntr = bits_of('RD_PNTR', '000', 3)
-        bits |= {fuse for i, fuse in enumerate(self._DQS_RD_PNTR) if rd_pntr >> i & 1}
+        keys |= {key for i, key in enumerate(self._DQS_RD_PNTR) if rd_pntr >> i & 1}
         mode = text('DQS_MODE', 'X1')
         if mode not in self._DQS_MODE:
             raise PackRefused(f"DQS {name}: DQS_MODE={mode!r} is not one of "
                               f"{sorted(self._DQS_MODE)}.")
-        bits |= self._DQS_MODE[mode]
+        keys |= set(self._DQS_MODE[mode])
         hwl = text('HWL', 'FALSE')
         if hwl not in ('TRUE', 'FALSE'):
             raise PackRefused(f"DQS {name}: HWL={hwl!r} is not true or false.")
         if hwl == 'TRUE':
-            bits |= self._DQS_HWL_TRUE
+            keys |= set(self._DQS_HWL_TRUE)
 
         src = getattr(self, '_dqs_fclk_src', {}).get((bel.x, bel.y))
         if src is not None:
             match = re.fullmatch(r'HCLK2([0-3])', src)
             if not match:
                 raise PackRefused(f"DQS {name}: FCLK arrives on {src}, not a block-2 HCLK lane.")
-            bits |= self._DQS_FCLK_LANE[int(match.group(1))]
+            keys |= set(self._DQS_FCLK_LANE[int(match.group(1))])
         elif bel.cell.connections.get('FCLK'):
             raise PackRefused(f"DQS {name}: FCLK is connected but no lane pip reached the site.")
 
-        cfg_x, cfg_y = self._DQS_CONFIG_CELL
+        cfg_x, cfg_y = self._DQS_CONFIG_CELLS[(bel.x, bel.y)]
         ttyp = self.chipdb.get_ttyp(cfg_x, cfg_y)
         table = self.chipdb.db.longfuses.get(ttyp, {}).get('unknown_58')
         if table is None:
             raise PackRefused(f"DQS {name}: cell X{cfg_x}Y{cfg_y} carries no longfuses table 58.")
-        known = set().union(*({tuple(f) for f in v} for v in table.values()))
-        if bits - known:
-            raise PackRefused(f"DQS {name}: fuses {sorted(bits - known)} are not in table 58 "
-                              f"of X{cfg_x}Y{cfg_y}.")
+        missing = sorted(key for key in keys if (key,) not in table)
+        if missing:
+            raise PackRefused(f"DQS {name}: table 58 of X{cfg_x}Y{cfg_y} has no key "
+                              f"{missing}.")
+        bits = {tuple(fuse) for key in keys for fuse in table[(key,)]}
         return [CellFuseBits(cfg_x, cfg_y, bits)]
 
     #==============================
@@ -7818,20 +7821,27 @@ class GW5AST_138C(GW5A):
     #==============================
     #========== DDR3 lane serializers
     #==============================
-    #: The ten lane-0 IOLOGIC positions nextpnr models for `OSER8_MEM` and
-    #: `IDES8_MEM`, as (x, y, side): the strobe on Y3 and dq[7:0]/dm[0] of the
-    #: hardware-proven controller's pin map.  MEASURED 2026-10-23 against
-    #: Gowin EDA 1.9.11.03 (TinyVCMI TOOL-009, `tools/dq_lane_probe.py`).
-    _DQ_LANE0_IOLOGIC = frozenset({(0, 68, 'A'),
-                                   (0, 70, 'A'), (0, 70, 'B'), (0, 73, 'A'), (0, 73, 'B'),
-                                   (0, 75, 'A'), (0, 75, 'B'), (0, 77, 'A'), (0, 77, 'B'),
-                                   (0, 79, 'A')})
+    #: The forty IOLOGIC positions nextpnr models for `OSER8_MEM` and
+    #: `IDES8_MEM`, as (x, y, side): each lane's strobe and dq/dm of the
+    #: hardware-proven controller's pin map, lanes 0 to 3 in that order.
+    #: MEASURED 2026-10-23 against Gowin EDA 1.9.11.03 (TinyVCMI TOOL-009 and
+    #: TOOL-012, `tools/dq_lane_probe.py --lane N`): every lane uses lane 0's
+    #: attributes, bit order and side-B cell offset.
+    _DQ_LANE_IOLOGIC = frozenset({
+        (0, 68, 'A'), (0, 70, 'A'), (0, 70, 'B'), (0, 73, 'A'), (0, 73, 'B'),
+        (0, 75, 'A'), (0, 75, 'B'), (0, 77, 'A'), (0, 77, 'B'), (0, 79, 'A'),
+        (0, 95, 'A'), (0, 97, 'A'), (0, 97, 'B'), (0, 100, 'A'), (0, 100, 'B'),
+        (0, 102, 'A'), (0, 102, 'B'), (0, 104, 'A'), (0, 104, 'B'), (0, 106, 'A'),
+        (0, 93, 'A'), (0, 82, 'A'), (0, 82, 'B'), (0, 84, 'A'), (0, 84, 'B'),
+        (0, 86, 'A'), (0, 86, 'B'), (0, 88, 'A'), (0, 88, 'B'), (0, 91, 'A'),
+        (0, 64, 'A'), (0, 55, 'A'), (0, 55, 'B'), (0, 57, 'A'), (0, 57, 'B'),
+        (0, 59, 'A'), (0, 61, 'A'), (0, 61, 'B'), (0, 66, 'A'), (0, 66, 'B')})
 
-    def _dq_lane0_check(self, bel: BelDesc) -> None:
-        if (bel.x, bel.y, bel.idx_str) not in self._DQ_LANE0_IOLOGIC:
+    def _dq_lane_check(self, bel: BelDesc) -> None:
+        if (bel.x, bel.y, bel.idx_str) not in self._DQ_LANE_IOLOGIC:
             raise PackRefused(
                 f"{bel.cell.typ} {bel.cell.name} is placed at X{bel.x}Y{bel.y} side "
-                f"{bel.idx_str}; only the lane-0 positions of the measured DDR3 lane "
+                f"{bel.idx_str}; only the positions of the four measured DDR3 lanes "
                 f"are modelled.")
 
     @staticmethod
@@ -7876,7 +7886,7 @@ class GW5AST_138C(GW5A):
         its fast-clock selection, which is the same lane encoding an `OSER8`
         gets and is taken from the existing handler.
         """
-        self._dq_lane0_check(bel)
+        self._dq_lane_check(bel)
         source = str(bel.cell.parms.get('TCLK_SOURCE', 'DQSW')).strip('"').upper()
         if source not in ('DQSW', 'DQSW270'):
             raise PackRefused(f"OSER8_MEM {bel.cell.name}: TCLK_SOURCE={source!r} is "
@@ -7896,7 +7906,7 @@ class GW5AST_138C(GW5A):
         the lane encoding an `IDES8` gets, that is everything the vendor
         writes for an `IDES8_MEM`.
         """
-        self._dq_lane0_check(bel)
+        self._dq_lane_check(bel)
         iol_bel = self.set_iologic_bel_fclk(self.make_IologicBelDesc(bel))
         attr_vals = self.common_iologic_handler(iol_bel)
         attr_vals += self._in_fclk_attrs(iol_bel)
