@@ -7236,6 +7236,20 @@ class GW5AST_138C(GW5A):
 
         # `DLL0` feature numbers this device's corner tables use, measured.
         wanted = []
+        # The clock source.  MEASURED 2026-10-24 (TinyVCMI
+        # `tools/ddrdll_port_probe.py`, Gowin EDA 1.9.11.03): from the port
+        # tile's `CLK0` the vendor sets feature 5 -- one of the four "vendor
+        # defaults" below, which every earlier design had because every one
+        # used `CLK0` -- and from HCLK block-2 lane n, which it takes when the
+        # clock also drives a `CLKDIV` at `LEFTSIDE[4+n]`, features 21 and
+        # `4-n` instead.  The hardware-proven controller's DLL is on lane 0.
+        src = getattr(self, '_ddrdll_clkin_src', None)
+        hclk = re.fullmatch(r'HCLK2([0-3])', src) if src else None
+        if src is not None and src != 'CLK0' and hclk is None:
+            raise PackRefused(f"DDRDLL {bel.cell.name}: CLKIN arrives on {src}, which is "
+                              f"neither CLK0 nor a block-2 HCLK lane.")
+        if hclk:
+            wanted += [21, 4 - int(hclk.group(1))]
         if codescal:
             wanted.append(5 + codescal)  # 0b111 -> feature 12
         if flag('SCAL_EN'):
@@ -7273,12 +7287,15 @@ class GW5AST_138C(GW5A):
         # the written pad-set image and the vendor's (TOOL-016) -- so there
         # they are written too.  Outside a context the measurement switch
         # still adds all six, and by default neither does.
+        # Feature 5 is `CLK0` as the clock source (above), so it is written
+        # only when the clock does not come from an HCLK lane.
+        defaults = (17, 18, 19) if hclk else (5, 17, 18, 19)
         if self.ddr_context:
-            for code in (5, 17, 18, 19):
+            for code in defaults:
                 if (code, 0) in table:
                     bits |= table[(code, 0)]
         if os.environ.get('APICULA_DDRDLL_VENDOR_DEFAULTS') == '1':
-            for code in (5, 17, 18, 19):
+            for code in defaults:
                 if (code, 0) in table:
                     bits |= table[(code, 0)]
             bits |= {(1, 12), (9, 13)}
@@ -7320,14 +7337,19 @@ class GW5AST_138C(GW5A):
         its own: the lane it names is written by `get_DQS_fuses` into the byte
         group's table 58, so it is recorded here and kept out of the chipdb
         pip lookup, which does not know it.  The same holds for the lane-1 and
-        lane-3 `FCLKA`/`FCLKB` pips nextpnr gives the DDR3 lane positions.
+        lane-3 `FCLKA`/`FCLKB` pips nextpnr gives the DDR3 lane positions, and
+        for the DDRDLL's `CLKIN` source, which `get_DDRDLL_fuses` writes.
         """
         self._dqs_fclk_src = {}
+        self._ddrdll_clkin_src = None
         lane_cells = {(x, y) for x, y, _ in self._DQ_LANE_IOLOGIC}
         def ordinary():
             for pip in pips:
                 if pip.dest == 'DQS_FCLK':
                     self._dqs_fclk_src[(pip.x, pip.y)] = pip.src
+                    continue
+                if pip.dest == 'DDRDLL_CLKIN':
+                    self._ddrdll_clkin_src = pip.src
                     continue
                 # a DDR3 lane serializer's FCLK from lane 1 or 3: no fuse of
                 # its own, the lane is the IOLOGIC's FCLKSEL (`_DQ_OUT_FCLK`)
@@ -7892,6 +7914,12 @@ class GW5AST_138C(GW5A):
             # picture came up.  The name '0' is value id 1, the row that exists.
             attr_vals = [AttrVal('LSROMUX_0', '0') if av.attr == 'LSROMUX_0' else av
                          for av in attr_vals]
+        if bel.cell.typ == 'OSER8' and self.ddr_context and self._reset_routed(bel):
+            # MEASURED 2026-10-24 (TinyVCMI `build/ddr3_phy_bringup`): a bank-7
+            # command OSER8 on a routed reset has no `LSROMUX_0`, the same
+            # rule as the lane serializers' (`_lsr_attrs`).  Applied under a
+            # declared DDR3 context only, where it was measured.
+            attr_vals = [av for av in attr_vals if av.attr != 'LSROMUX_0']
         return (attr_vals
                 + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
                 + self.fclk_lane_attrs(bel)
@@ -8028,6 +8056,28 @@ class GW5AST_138C(GW5A):
     #: the vendor does not set (`(11,1)` and `(11,7)` on side A).
     _DQ_LSR_DEFAULTS = [AttrVal('LSRIMUX_0', '0'), AttrVal('LSROMUX_0', '0')]
 
+    def _reset_routed(self, bel: BelDesc) -> bool:
+        """Whether the cell's `RESET` is a routed signal rather than a constant."""
+        nets = bel.cell.connections.get('RESET')
+        return bool(nets) and not self.pnr.is_constant_net(nets[0])
+
+    def _lsr_attrs(self, bel: BelDesc, mux: str) -> list[AttrVal]:
+        """`_DQ_LSR_DEFAULTS`, less the cell's own half's mux when its `RESET`
+        is routed.
+
+        `0` is the constant-reset selection, and every design that measured
+        it tied `RESET` low.  MEASURED 2026-10-24 (TinyVCMI
+        `build/ddr3_phy_bringup`, every lane and bank-7 serializer on a routed
+        reset): the vendor leaves out the multiplexer of the half whose
+        serializer takes the signal -- `LSROMUX_0` for an output, `LSRIMUX_0`
+        for an input -- so its absence fuse is set, `(11,1)` or `(11,7)` on
+        side A and `(0,1)` or `(0,3)` on side B, and keeps the other half's at
+        `0`.
+        """
+        if not self._reset_routed(bel):
+            return list(self._DQ_LSR_DEFAULTS)
+        return [av for av in self._DQ_LSR_DEFAULTS if av.attr != mux]
+
     #: The unnamed (attribute, value) pair an IDES8_MEM carries when an IODELAY
     #: feeds it; see `get_IDES8_MEM_fuses`.
     _DQ_IODELAY_IDES_ATTR = (133, 118)
@@ -8085,7 +8135,7 @@ class GW5AST_138C(GW5A):
         else:
             attr_vals += self._fclk_only(self.get_out_iologic_attrs(iol_bel))
         attr_vals += [AttrVal('OUTMODE', 'MODDRX4'), AttrVal('CLKOMUX', 'ENABLE'),
-                      AttrVal('WRFCLKSEL', source)] + self._DQ_LSR_DEFAULTS
+                      AttrVal('WRFCLKSEL', source)] + self._lsr_attrs(bel, 'LSROMUX_0')
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
         return self.iologic_fuse_bits(iol_bel, av)
 
@@ -8101,7 +8151,7 @@ class GW5AST_138C(GW5A):
         attr_vals = self.common_iologic_handler(iol_bel)
         attr_vals += self._in_fclk_attrs(iol_bel)
         attr_vals += [AttrVal('INMODE', 'MIDDRX4'), AttrVal('FIFO', 'ENABLE'),
-                      AttrVal('CLKIMUX', 'ENABLE')] + self._DQ_LSR_DEFAULTS
+                      AttrVal('CLKIMUX', 'ENABLE')] + self._lsr_attrs(bel, 'LSRIMUX_0')
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
         if bel.cell.attrs.get('IODELAY') == 'IN':
             # MEASURED (TinyVCMI TOOL-009, `tools/dq_pad_probe.py`): with a
