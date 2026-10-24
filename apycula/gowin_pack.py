@@ -55,6 +55,11 @@ class CliArgs:
         parser.add_argument('--cpu_as_gpio', action = 'store_true')
         parser.add_argument('--i2c_as_gpio', action = 'store_true')
         parser.add_argument(
+            '--ddr3-context', default=None, metavar='MANIFEST',
+            help='GW5AST-138C: declare a DDR3 context; only the bank 6/7 balls the '
+                 'JSON manifest lists may be configured, each exactly as it states'
+        )
+        parser.add_argument(
             '--multiboot_address',
             type=lambda value: int(value, 0),
             default=None,
@@ -85,6 +90,10 @@ class CliArgs:
 
     def get_output_filename(self) -> str:
         return self.args.output
+
+    def get_ddr3_context(self) -> str:
+        """ Path of the declared DDR3 ball manifest, or None """
+        return getattr(self.args, 'ddr3_context', None)
 
     def get_multiboot_addr(self) -> int:
         address = self.args.multiboot_address
@@ -7442,6 +7451,10 @@ class GW5AST_138C(GW5A):
         # Only these two names, the DDR3 standards, are kept whole.
         self.io_type_alias = {k - {'SSTL15', 'SSTL15D'}: v
                               for k, v in self.io_type_alias.items()}
+        manifest = cli_args.get_ddr3_context()
+        if manifest:
+            self.ddr3_balls, self.ddr3_settings = self._load_ddr3_manifest(manifest)
+            self.ddr_context = True
         # `SLEWRATE` moves out of the output defaults into
         # `design_only_io_attrs`; see that attribute for the measurement.
         for name in ('default_obuf_attrs', 'default_tbuf_attrs',
@@ -7525,7 +7538,101 @@ class GW5AST_138C(GW5A):
                 f"(D20c, D54, F73/PR #423)")
         if bank in self.ddr3_banks and self.ddr_context:
             bel = self._ddr_n_half_io_type(bel)
+            self._admit_ddr3_pad(bel, bank)
         super().add_io_to_bank(bel)
+
+    #: The IO attributes a declared DDR3 pad may carry: its standard and the
+    #: three settings the manifest fixes.
+    _ddr3_pad_attrs = frozenset({'IO_TYPE', 'BANK_VCCIO', 'PULLMODE', 'DRIVE'})
+
+    def _load_ddr3_manifest(self, path: str):
+        """ The DDR3 ball manifest `--ddr3-context` names, checked against
+        this die: every ball must be a bank 6/7 pad at the IO site it claims,
+        and a pair's two halves must name each other. """
+        with open(path) as f:
+            manifest = json.load(f)
+        db = self.chipdb.db
+        if manifest.get('device') != 'GW5AST-138C':
+            raise PackRefused(f"DDR3 manifest {path} is for {manifest.get('device')!r}, "
+                              f"not the GW5AST-138C.")
+        package = manifest.get('package')
+        pinout = db.pinout.get('GW5AST-138C', {}).get(package)
+        if pinout is None:
+            raise PackRefused(f"DDR3 manifest {path}: package {package!r} is not in this chipdb.")
+        settings = manifest.get('settings', {})
+        if settings != {'BANK_VCCIO': '1.5', 'PULL_MODE': 'NONE', 'DRIVE': '8'}:
+            raise PackRefused(f"DDR3 manifest {path}: settings {settings} are not the "
+                              f"proven BANK_VCCIO=1.5, PULL_MODE=NONE, DRIVE=8.")
+        balls = {}
+        for ball in manifest.get('balls', []):
+            pin, site, io_type = ball.get('pin'), ball.get('site'), ball.get('io_type')
+            if pinout.get(pin, [None])[0] != site:
+                raise PackRefused(f"DDR3 manifest {path}: ball {pin} is not IO site {site}.")
+            if db.pin_bank.get(site) not in self.ddr3_banks or ball.get('bank') != db.pin_bank.get(site):
+                raise PackRefused(f"DDR3 manifest {path}: ball {pin} ({site}) is not on the "
+                                  f"bank 6/7 it claims.")
+            if io_type not in ('SSTL15', 'SSTL15D') or (io_type == 'SSTL15D') != ('half' in ball):
+                raise PackRefused(f"DDR3 manifest {path}: ball {pin} is {io_type!r}; a single "
+                                  f"ball must be SSTL15 and a pair's halves SSTL15D.")
+            if site in balls:
+                raise PackRefused(f"DDR3 manifest {path}: IO site {site} is listed twice.")
+            balls[site] = ball
+        by_pin = {b['pin']: b for b in balls.values()}
+        for ball in balls.values():
+            if 'half' in ball:
+                mate = by_pin.get(ball.get('pair'))
+                if (mate is None or mate.get('pair') != ball['pin']
+                        or {mate.get('half'), ball['half']} != {'P', 'N'}
+                        or mate['site'][:-1] != ball['site'][:-1]):
+                    raise PackRefused(f"DDR3 manifest {path}: ball {ball['pin']}'s pair is not "
+                                      f"the other half of its IO cell.")
+        if not balls:
+            raise PackRefused(f"DDR3 manifest {path} lists no ball.")
+        return balls, settings
+
+    def _admit_ddr3_pad(self, bel: IoBelDesc, bank: int):
+        """ A pad on a DDR3 bank under a declared DDR context: a manifest
+        ball, configured exactly as the manifest states, or a refusal.
+
+        The rules are the proven controller's constraints and nothing else
+        (TinyVCMI TOOL-013): `SSTL15` on a single ball and `SSTL15D` on a
+        listed pair, `BANK_VCCIO=1.5`, `PULL_MODE=NONE`, `DRIVE=8` on an
+        output and no drive on an input, and no other IO attribute.  An
+        `LVCMOS` standard, an unlisted ball and a pair the manifest does not
+        name are all refused, whatever else the design says.
+        """
+        site = chipdb.loc2pin_name(self.chipdb.db, bel.y, bel.x) + bel.idx_str
+        where = f"IO cell {bel.cell.name} at X{bel.x}Y{bel.y}/IOB{bel.idx_str} (pad {site})"
+        balls = getattr(self, 'ddr3_balls', None)
+        if balls is None:
+            raise PackRefused(f"{where} is on DDR3 bank {bank}, and the declared DDR context "
+                              f"has no ball manifest.")
+        ball = balls.get(site)
+        if ball is None:
+            raise PackRefused(f"{where} is on DDR3 bank {bank} but is not a ball of the "
+                              f"declared DDR3 manifest.")
+        attrs = bel.cell.attrs
+        io_type = attrs.get('IO_TYPE')
+        if io_type != ball['io_type']:
+            raise PackRefused(f"{where} is {io_type or 'without an IO_TYPE'}; the DDR3 "
+                              f"manifest admits it only as {ball['io_type']}.")
+        if bel.is_diff_io() != ('half' in ball) or bel.cell.parms.get('DIFF', ball.get('half')) != ball.get('half'):
+            raise PackRefused(f"{where} is used as {'a' if bel.is_diff_io() else 'no'} pair half; "
+                              f"the DDR3 manifest lists it as "
+                              f"{'the ' + ball['half'] + ' half of a pair' if 'half' in ball else 'a single ball'}.")
+        if ball.get('half') == 'N':
+            # the pair's settings are the P cell's; `_ddr_n_half_io_type`
+            # has already given this half its P half's standard
+            return
+        want = {'BANK_VCCIO': self.ddr3_settings['BANK_VCCIO'],
+                'PULLMODE': self.ddr3_settings['PULL_MODE']}
+        if 'IS_OUTPUT' in bel.flags:
+            want['DRIVE'] = self.ddr3_settings['DRIVE']
+        got = {a: attrs[a] for a in attrs if a in attrids.iob_attrids and a != 'IO_TYPE'}
+        if got != want:
+            extra = sorted(set(got) - set(want))
+            raise PackRefused(f"{where} carries {got}; the DDR3 manifest admits exactly {want}"
+                              + (f" and no {extra}" if extra else "") + ".")
 
     def _ddr_n_half_io_type(self, bel: IoBelDesc) -> IoBelDesc:
         """A DDR3-bank differential N half, with its P half's `IO_TYPE` and
@@ -8313,6 +8420,9 @@ class GW5AST_138C(GW5A):
                    for b in single):
                 bank_desc.set_attr('VREF', 'INTERNAL')
                 bank_desc.set_attr('PADDI', 'PADDI')
+            if bank_desc.bank_vccio != '1.5':
+                raise PackRefused(f"DDR3 bank {bank} resolves to BANK_VCCIO="
+                                  f"{bank_desc.bank_vccio}; a declared DDR context requires 1.5.")
 
     def _ddr_bank_in_context(self, x: int, y: int) -> bool:
         return self.ddr_context and self.chipdb.get_loc_bank(x, y) in self.ddr3_banks
@@ -8616,6 +8726,9 @@ def create_output_bitstream(cli_args: CliArgs, device: Device) -> Bitstream:
 def _pack(cli_args):
     pnr = Netlist(cli_args)
     device = create_device(cli_args, pnr)
+    if cli_args.get_ddr3_context() and not isinstance(device, GW5AST_138C):
+        raise PackRefused(f"--ddr3-context is defined for the GW5AST-138C only, "
+                          f"not {cli_args.get_device()}.")
     output = create_output_bitstream(cli_args, device)
 
     pack = Pack(cli_args, pnr, device)

@@ -69,10 +69,27 @@ def test_a_pad_on_every_other_bank_still_packs(bank):
     assert len(dev.banked) == 1
 
 
-def test_a_declared_ddr_context_lifts_the_refusal():
-    """Phase 5b owns these banks and says so; nothing in Phase 3 sets it."""
+def test_a_declared_ddr_context_lifts_the_refusal_for_a_manifest_ball():
+    """Phase 5b owns these banks and says so with a ball manifest
+    (`--ddr3-context`); nothing in Phase 3 sets it.  The rules a declared
+    ball must then meet are in `test_ddr3_context_138c.py`."""
     assert gowin_pack.GW5AST_138C.ddr_context is False
     dev = _Device(6)
     dev.ddr_context = True
-    dev.add_io_to_bank(_io_bel(184, 55))
+    dev.ddr3_balls = {'IOR55A': {'pin': 'X1', 'site': 'IOR55A', 'bank': 6,
+                                 'io_type': 'SSTL15'}}
+    dev.ddr3_settings = {'BANK_VCCIO': '1.5', 'PULL_MODE': 'NONE', 'DRIVE': '8'}
+    cell = gowin_pack.CellDesc(name='dq', typ='IOBUF', parms={},
+                               attrs={'IO_TYPE': 'SSTL15', 'BANK_VCCIO': '1.5',
+                                      'PULLMODE': 'NONE', 'DRIVE': '8'},
+                               connections={})
+    dev.add_io_to_bank(gowin_pack.IoBelDesc(184, 55, 'A', cell, {'IS_OUTPUT': 1}))
     assert len(dev.banked) == 1
+
+
+def test_a_declared_ddr_context_without_a_manifest_is_refused():
+    dev = _Device(6)
+    dev.ddr_context = True
+    with pytest.raises(gowin_pack.PackRefused, match="no ball manifest"):
+        dev.add_io_to_bank(_io_bel(184, 55))
+    assert dev.banked == []
