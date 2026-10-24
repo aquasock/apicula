@@ -7429,6 +7429,15 @@ class GW5AST_138C(GW5A):
         self.default_ibuf_attrs = [
             (attr, 'ON' if attr == 'HYSTERESIS' else val)
             for attr, val in self.default_ibuf_attrs]
+        # This die's IOB tables key `IO_TYPE` on `SSTL15` and `SSTL15D`
+        # themselves (710 and 843 entries on the bank-6 cells), and the family
+        # codes `SSTL` and `SSTL_D` the generic alias folds them into have no
+        # `logicinfo` entry at all; the fold also loses the 1.5 V the bank's
+        # VCCIO check needs.  MEASURED 2026-10-23 against Gowin EDA 1.9.11.03
+        # SSTL15/SSTL15D lane builds (TinyVCMI `tools/ddr_bank_check.py`).
+        # Only these two names, the DDR3 standards, are kept whole.
+        self.io_type_alias = {k - {'SSTL15', 'SSTL15D'}: v
+                              for k, v in self.io_type_alias.items()}
         # `SLEWRATE` moves out of the output defaults into
         # `design_only_io_attrs`; see that attribute for the measurement.
         for name in ('default_obuf_attrs', 'default_tbuf_attrs',
