@@ -7843,6 +7843,10 @@ class GW5AST_138C(GW5A):
     #: the vendor does not set (`(11,1)` and `(11,7)` on side A).
     _DQ_LSR_DEFAULTS = [AttrVal('LSRIMUX_0', '0'), AttrVal('LSROMUX_0', '0')]
 
+    #: The unnamed (attribute, value) pair an IDES8_MEM carries when an IODELAY
+    #: feeds it; see `get_IDES8_MEM_fuses`.
+    _DQ_IODELAY_IDES_ATTR = (133, 118)
+
     #: The input half's fast-clock selection per HCLK lane.  MEASURED
     #: (TinyVCMI TOOL-009, `tools/dq_lane_probe.py` lane designs): the vendor's
     #: `IDES8_MEM` sets exactly the fuses of `FCLKSEL5=HCLK0` and
@@ -7899,6 +7903,17 @@ class GW5AST_138C(GW5A):
         attr_vals += [AttrVal('INMODE', 'MIDDRX4'), AttrVal('FIFO', 'ENABLE'),
                       AttrVal('CLKIMUX', 'ENABLE')] + self._DQ_LSR_DEFAULTS
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
+        if bel.cell.attrs.get('IODELAY') == 'IN':
+            # MEASURED (TinyVCMI TOOL-009, `tools/dq_pad_probe.py`): with a
+            # static IODELAY folded into it, the vendor's IDES8_MEM also sets
+            # IOLOGIC attribute 133 at value 118 -- one fuse, (11,15) on side
+            # A and (0,14) on side B -- which `attrids` has no name for, so it
+            # is added by its `logicinfo` index rather than invented a name.
+            index = self.chipdb.db.logicinfo['IOLOGIC'].get(self._DQ_IODELAY_IDES_ATTR)
+            if index is None:
+                raise PackRefused(f"IDES8_MEM {bel.cell.name}: this device's IOLOGIC table "
+                                  f"has no entry for attribute 133 value 118.")
+            av.add(index)
         return self.iologic_fuse_bits(iol_bel, av)
 
     #: The `INMODE` parameter `nextpnr` writes for a 16:1 input gearbox, and
