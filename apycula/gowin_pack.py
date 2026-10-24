@@ -1867,10 +1867,14 @@ class Device:
                 #print(attrval)
                 self.chipdb.get_iob_attr_val(attrval, av)
             #print(bank_desc.io_type, bank_desc.bank_vccio)
-            self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", bank_desc.io_type), av)
+            self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", self.get_unused_io_type(io_cfg, bank_desc)), av)
             self.chipdb.get_iob_attr_val(AttrVal("BANK_VCCIO", bank_desc.bank_vccio), av)
             fuses += self.get_iob_fuses(io_cfg.x, io_cfg.y, io_cfg.idx_str, av)
         return fuses
+
+    def get_unused_io_type(self, io_cfg: IoCfg, bank_desc: BankDesc) -> str:
+        """ IO_TYPE an unused IO is programmed with: its bank's """
+        return bank_desc.io_type
 
     def get_io_bank_fuses(self) -> list[CellFuseBits]:
         fuses = self.get_unused_io_fuses()
@@ -7519,7 +7523,46 @@ class GW5AST_138C(GW5A):
                 f"GW5AST-138C: no design outside a declared DDR context may "
                 f"configure a bank 6/7 pad, whatever its IO_TYPE "
                 f"(D20c, D54, F73/PR #423)")
+        if bank in self.ddr3_banks and self.ddr_context:
+            bel = self._ddr_n_half_io_type(bel)
         super().add_io_to_bank(bel)
+
+    def _ddr_n_half_io_type(self, bel: IoBelDesc) -> IoBelDesc:
+        """A DDR3-bank differential N half, with its P half's `IO_TYPE` and
+        `IOLOGIC_IOB` mark.
+
+        nextpnr puts the pair's standard and its serializer mark on the P
+        cell only, while the vendor writes `TRI_MUX=TMDDR` on both halves.  `BankDesc`
+        then takes an N half without `IO_TYPE` for MIPI -- its `is_mipi` test
+        is never called, so it is always true -- and the N half sets the
+        bank's LVDS VCCIO to `LVDS25`'s 2.5 V: an SSTL15D strobe programmed
+        bank 6 for 2.5 V.  MEASURED 2026-10-23 against Gowin EDA 1.9.11.03
+        (TinyVCMI TOOL-013, `tools/ddr_bank_check.py`).  Only the DDR3 banks
+        under a declared DDR context take this path; every other pair keeps
+        the inherited behaviour.
+        """
+        if (bel.cell.parms.get('DIFF') != 'N' or 'IO_TYPE' in bel.cell.attrs
+                or not bel.is_diff_io()):
+            return bel
+        want = f"X{bel.x}Y{bel.y}/IOBA"
+        cells = self.pnr.in_file['modules'][self.pnr.top_module_name]['cells']
+        for name, data in cells.items():
+            if data.get('attributes', {}).get('NEXTPNR_BEL') != want:
+                continue
+            p_cell = self.normalize_io_cell_attr(self.pnr.fill_cell_desc(name, data))
+            io_type = p_cell.attrs.get('IO_TYPE')
+            if p_cell.parms.get('DIFF') != 'P' or not io_type:
+                break
+            # the serializer that drives the pair's tristate sits on the P
+            # half's IOLOGIC, and the vendor's `TRI_MUX` is on both halves
+            parms = dict(bel.cell.parms)
+            if 'IOLOGIC_IOB' in p_cell.parms:
+                parms['IOLOGIC_IOB'] = p_cell.parms['IOLOGIC_IOB']
+            cell = CellDesc(bel.cell.name, bel.cell.typ, parms,
+                            dict(bel.cell.attrs, IO_TYPE=io_type), bel.cell.connections)
+            return IoBelDesc(bel.x, bel.y, bel.idx_str, cell, bel.flags)
+        raise PackRefused(f"IO cell {bel.cell.name} at X{bel.x}Y{bel.y}/IOB{bel.idx_str} is "
+                          f"the N half of a DDR3-bank pair whose P half carries no IO_TYPE.")
 
     def reject_iologic_unsupported(self):
         """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.
@@ -8210,12 +8253,105 @@ class GW5AST_138C(GW5A):
         The `GW5A` base class keeps its own set unchanged -- the GW5A-25A and
         the GW5AT-60B have no such measurement, and a default is not a thing
         to change on a device nobody has measured (`S3`).
+
+        The DDR3 banks under a declared DDR context are the exception, and
+        only they: there the vendor's set **with** `DRIVE=8` and
+        `DRIVE_LEVEL=8` is written, under `get_unused_io_type`'s standard.
+        MEASURED 2026-10-23 against Gowin EDA 1.9.11.03 on Linux (TinyVCMI
+        TOOL-013, `tools/unused_pin_probe.py`, `tools/ddr_bank_check.py`):
+        that set equals the vendor on 199 of 199 unused left- and right-edge
+        pins and on every unused bank 6/7 pin of the lane and bank-7
+        designs, under both TinyVCMI's and the fuzz harness's build recipe,
+        and the set above on none -- the opposite of `D108`, whose corpus was
+        not on that host.  Which one is right for the platforms in between
+        is unsettled, so the rest of the die keeps `D108`.
         """
+        if self._ddr_bank_in_context(io_cfg.x, io_cfg.y):
+            return [AttrVal('IO_TYPE', self.get_unused_io_type(io_cfg, bank_desc))
+                    if av.attr == 'IO_TYPE' else av
+                    for av in super().get_unused_io_attrvals(io_cfg, bank_desc)]
         keep_pullup = bool(self._pullup_cfgs & set(io_cfg.cfgs))
         attrvals = super().get_unused_io_attrvals(io_cfg, bank_desc)
         return [AttrVal('PULLMODE', 'UP')
                 if keep_pullup and av.attr == 'PULLMODE' else av
                 for av in attrvals if av.attr not in ('DRIVE', 'DRIVE_LEVEL')]
+
+    def get_unused_io_type(self, io_cfg: IoCfg, bank_desc: BankDesc) -> str:
+        """ An unused DDR3-bank pin under a declared DDR context is not given
+        its bank's SSTL standard.
+
+        MEASURED 2026-10-23 (TinyVCMI TOOL-013): beside an SSTL15 pad the
+        vendor leaves the pin's input-side `IO_TYPE=SSTL15 & PADDI` entries
+        clear, which the bank's own type sets (`(2,3)`, `(2,6)` on side A,
+        `(3,1)`, `(3,10)` on side B); `LVCMOS12` to `LVCMOS33` all give the
+        vendor's fuses, so the device's unused default is used.
+        """
+        if self._ddr_bank_in_context(io_cfg.x, io_cfg.y):
+            return self.get_default_unused_io_type()
+        return super().get_unused_io_type(io_cfg, bank_desc)
+
+    def check_io_banks(self):
+        """ A used DDR3 bank under a declared DDR context gets the vendor's
+        SSTL bank settings.
+
+        MEASURED 2026-10-23 against Gowin EDA 1.9.11.03 (TinyVCMI TOOL-013,
+        `tools/ddr_bank_check.py`): a bank with a used single-ended SSTL15
+        input -- an `IBUF`, or a DQ `IOBUF` on its own -- has its internal
+        reference on, `VREF=INTERNAL` with `PADDI`; a bank whose only
+        standards are SSTL15D pairs takes `IO_TYPE=SSTL15D` rather than the
+        default; bank 7, outputs only, gets neither.
+        """
+        super().check_io_banks()
+        for bank, bank_desc in self.io_banks.items():
+            if not (self.ddr_context and bank in self.ddr3_banks and bank_desc.is_used):
+                continue
+            single = [b for b in bank_desc.bels if not b.is_diff_io()]
+            pairs = {b.cell.attrs.get('IO_TYPE') for b in bank_desc.bels if b.is_diff_io()}
+            if not single and pairs == {'SSTL15D'}:
+                bank_desc.set_attr('IO_TYPE', 'SSTL15D')
+            if any(b.cell.typ in ('IBUF', 'IOBUF') and b.cell.attrs.get('IO_TYPE') == 'SSTL15'
+                   for b in single):
+                bank_desc.set_attr('VREF', 'INTERNAL')
+                bank_desc.set_attr('PADDI', 'PADDI')
+
+    def _ddr_bank_in_context(self, x: int, y: int) -> bool:
+        return self.ddr_context and self.chipdb.get_loc_bank(x, y) in self.ddr3_banks
+
+    #: IO types whose pad has a tristate a serializer can drive
+    _tristate_io = frozenset({'IOBUF', 'TBUF', 'ELVDS_IOBUF', 'ELVDS_TBUF'})
+    #: The emulated-LVDS output additions measured on the desktop core's
+    #: LVCMOS33D TMDS pads that an SSTL15D output does not carry; see
+    #: `default_elvds_obuf_attrs` above.
+    _tmds_elvds_obuf_attrs = frozenset({'DRIVE_LEVEL', 'PADDI'})
+
+    def set_io_attrvals(self, bel: IoBelDesc, default_attrs: list[tuple[str, str]], defaults_only = False) -> set[int]:
+        """ A used DDR3-bank pad under a declared DDR context gets the
+        vendor's SSTL15/SSTL15D set; every other pad is unchanged.
+
+        MEASURED 2026-10-23 against Gowin EDA 1.9.11.03 on Linux, every lane's
+        DQ, DM and strobe pads and bank 7's address, clock and reset pads
+        (TinyVCMI TOOL-013, `tools/ddr_bank_check.py`):
+
+        * every output is `SLEWRATE=FAST`, which `design_only_io_attrs`
+          otherwise leaves to the design;
+        * a pad whose tristate a serializer drives is `TRI_MUX=TMDDR`;
+        * the SSTL15D clock's `ELVDS_OBUF` carries the desktop TMDS
+          additions' `IOB_UNKNOWN51=TRIMUX` but not `DRIVE_LEVEL` or `PADDI`;
+        * the SSTL15D strobe's `ELVDS_IOBUF` is `IOB_UNKNOWN51=TRIMUX` and
+          takes the design's `PULLMODE`.
+        """
+        if defaults_only or not self._ddr_bank_in_context(bel.x, bel.y):
+            return super().set_io_attrvals(bel, default_attrs, defaults_only)
+        attrs = list(default_attrs)
+        if bel.cell.typ == 'ELVDS_OBUF':
+            attrs = [(a, v) for a, v in attrs if a not in self._tmds_elvds_obuf_attrs]
+        if bel.cell.typ == 'ELVDS_IOBUF':
+            attrs += [('IOB_UNKNOWN51', 'TRIMUX'), ('PULLMODE', 'NONE')]
+        if 'IS_OUTPUT' in bel.flags and not any(a == 'SLEWRATE' for a, _ in attrs):
+            attrs.append(('SLEWRATE', 'FAST'))
+        if bel.cell.typ in self._tristate_io and 'IOLOGIC_IOB' in bel.cell.parms:
+            attrs.append(('TRI_MUX', 'TMDDR'))
+        return super().set_io_attrvals(bel, attrs, defaults_only)
 
     # debug
     def __repr__(self):
